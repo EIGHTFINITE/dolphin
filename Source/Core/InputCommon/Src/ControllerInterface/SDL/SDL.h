@@ -1,7 +1,7 @@
 #ifndef _CIFACE_SDL_H_
 #define _CIFACE_SDL_H_
 
-#include "../ControllerInterface.h"
+#include "../Device.h"
 
 #include <list>
 
@@ -23,9 +23,9 @@ namespace ciface
 namespace SDL
 {
 
-void Init( std::vector<ControllerInterface::Device*>& devices );
+void Init( std::vector<Core::Device*>& devices );
 
-class Joystick : public ControllerInterface::Device
+class Joystick : public Core::Device
 {
 private:
 
@@ -40,7 +40,7 @@ private:
 	};
 #endif
 
-	class Button : public Input
+	class Button : public Core::Device::Input
 	{
 	public:
 		std::string GetName() const;
@@ -51,7 +51,7 @@ private:
 		 const u8 m_index;
 	};
 
-	class Axis : public Input
+	class Axis : public Core::Device::Input
 	{
 	public:
 		std::string GetName() const;
@@ -106,6 +106,7 @@ private:
 		EffectIDState& m_effect;
 	};
 
+#ifdef SDL_HAPTIC_SQUARE
 	class SquareEffect : public Output
 	{
 	public:
@@ -115,6 +116,7 @@ private:
 	private:
 		EffectIDState& m_effect;
 	};
+#endif // defined(SDL_HAPTIC_SQUARE)
 
 	class TriangleEffect : public Output
 	{

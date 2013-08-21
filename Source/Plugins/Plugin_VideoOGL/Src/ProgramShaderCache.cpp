@@ -1,26 +1,15 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "ProgramShaderCache.h"
+#include "DriverDetails.h"
 #include "MathUtil.h"
 #include "StreamBuffer.h"
 #include "Debugger.h"
 #include "Statistics.h"
 #include "ImageWrite.h"
+#include "Render.h"
 
 namespace OGL
 {
@@ -35,12 +24,15 @@ u32 ProgramShaderCache::s_ubo_buffer_size;
 bool ProgramShaderCache::s_ubo_dirty;
 
 static StreamBuffer *s_buffer;
+static int num_failures = 0;
 
 LinearDiskCache<SHADERUID, u8> g_program_disk_cache;
 static GLuint CurrentProgram = 0;
 ProgramShaderCache::PCache ProgramShaderCache::pshaders;
 ProgramShaderCache::PCacheEntry* ProgramShaderCache::last_entry;
 SHADERUID ProgramShaderCache::last_uid;
+UidChecker<PixelShaderUid,PixelShaderCode> ProgramShaderCache::pixel_uid_checker;
+UidChecker<VertexShaderUid,VertexShaderCode> ProgramShaderCache::vertex_uid_checker;
 
 static char s_glsl_header[1024] = "";
 
@@ -119,12 +111,11 @@ void SHADER::SetProgramBindings()
 		// So we do support extended blending
 		// So we need to set a few more things here.
 		// Bind our out locations
+#ifndef USE_GLES3
 		glBindFragDataLocationIndexed(glprogid, 0, 0, "ocol0");
 		glBindFragDataLocationIndexed(glprogid, 0, 1, "ocol1");
+#endif
 	}
-	else
-		glBindFragDataLocation(glprogid, 0, "ocol0");
-
 	// Need to set some attribute locations
 	glBindAttribLocation(glprogid, SHADER_POSITION_ATTRIB, "rawpos");
 	
@@ -174,6 +165,8 @@ void ProgramShaderCache::UploadConstants()
 		glBindBufferRange(GL_UNIFORM_BUFFER, 1, s_buffer->getBuffer(), offset, s_ps_data_size);
 		glBindBufferRange(GL_UNIFORM_BUFFER, 2, s_buffer->getBuffer(), offset + s_vs_data_offset, s_vs_data_size);
 		s_ubo_dirty = false;
+		
+		ADDSTAT(stats.thisFrame.bytesUniformStreamed, s_ubo_buffer_size);
 	}
 }
 
@@ -186,21 +179,20 @@ SHADER* ProgramShaderCache::SetShader ( DSTALPHA_MODE dstAlphaMode, u32 componen
 {
 	SHADERUID uid;
 	GetShaderId(&uid, dstAlphaMode, components);
-	
+
 	// Check if the shader is already set
 	if (last_entry)
 	{
 		if (uid == last_uid)
 		{
 			GFX_DEBUGGER_PAUSE_AT(NEXT_PIXEL_SHADER_CHANGE, true);
-			ValidateShaderIDs(last_entry, dstAlphaMode, components);
 			last_entry->shader.Bind();
 			return &last_entry->shader;
 		}
 	}
-	
+
 	last_uid = uid;
-	
+
 	// Check if shader is already in cache
 	PCache::iterator iter = pshaders.find(uid);
 	if (iter != pshaders.end())
@@ -209,24 +201,24 @@ SHADER* ProgramShaderCache::SetShader ( DSTALPHA_MODE dstAlphaMode, u32 componen
 		last_entry = entry;
 
 		GFX_DEBUGGER_PAUSE_AT(NEXT_PIXEL_SHADER_CHANGE, true);
-		ValidateShaderIDs(entry, dstAlphaMode, components);
 		last_entry->shader.Bind();
 		return &last_entry->shader;
 	}
-	
+
 	// Make an entry in the table
 	PCacheEntry& newentry = pshaders[uid];
 	last_entry = &newentry;
 	newentry.in_cache = 0;
-	
-	const char *vcode = GenerateVertexShaderCode(components, API_OPENGL);
-	const char *pcode = GeneratePixelShaderCode(dstAlphaMode, API_OPENGL, components);
-	
+
+	VertexShaderCode vcode;
+	PixelShaderCode pcode;
+	GenerateVertexShaderCode(vcode, components, API_OPENGL);
+	GeneratePixelShaderCode(pcode, dstAlphaMode, API_OPENGL, components);
+
 	if (g_ActiveConfig.bEnableShaderDebugging)
 	{
-		GetSafeShaderId(&newentry.safe_uid, dstAlphaMode, components);
-		newentry.shader.strvprog = vcode;
-		newentry.shader.strpprog = pcode;
+		newentry.shader.strvprog = vcode.GetBuffer();
+		newentry.shader.strpprog = pcode.GetBuffer();
 	}
 
 #if defined(_DEBUG) || defined(DEBUGFAST)
@@ -234,13 +226,13 @@ SHADER* ProgramShaderCache::SetShader ( DSTALPHA_MODE dstAlphaMode, u32 componen
 		static int counter = 0;
 		char szTemp[MAX_PATH];
 		sprintf(szTemp, "%svs_%04i.txt", File::GetUserPath(D_DUMP_IDX).c_str(), counter++);
-		SaveData(szTemp, vcode);
+		SaveData(szTemp, vcode.GetBuffer());
 		sprintf(szTemp, "%sps_%04i.txt", File::GetUserPath(D_DUMP_IDX).c_str(), counter++);
-		SaveData(szTemp, pcode);
+		SaveData(szTemp, pcode.GetBuffer());
 	}
 #endif
 
-	if (!CompileShader(newentry.shader, vcode, pcode)) {
+	if (!CompileShader(newentry.shader, vcode.GetBuffer(), pcode.GetBuffer())) {
 		GFX_DEBUGGER_PAUSE_AT(NEXT_ERROR, true);
 		return NULL;
 	}
@@ -257,7 +249,7 @@ bool ProgramShaderCache::CompileShader ( SHADER& shader, const char* vcode, cons
 {
 	GLuint vsid = CompileSingleShader(GL_VERTEX_SHADER, vcode);
 	GLuint psid = CompileSingleShader(GL_FRAGMENT_SHADER, pcode);
-	
+
 	if(!vsid || !psid)
 	{
 		glDeleteShader(vsid);
@@ -270,7 +262,7 @@ bool ProgramShaderCache::CompileShader ( SHADER& shader, const char* vcode, cons
 	glAttachShader(pid, vsid);
 	glAttachShader(pid, psid);
 
-	if (g_ActiveConfig.backend_info.bSupportsGLSLCache)
+	if (g_ogl_config.bSupportsGLSLCache)
 		glProgramParameteri(pid, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 
 	shader.SetProgramBindings();
@@ -292,11 +284,19 @@ bool ProgramShaderCache::CompileShader ( SHADER& shader, const char* vcode, cons
 		glGetProgramInfoLog(pid, length, &charsWritten, infoLog);
 		ERROR_LOG(VIDEO, "Program info log:\n%s", infoLog);
 		char szTemp[MAX_PATH];
-		sprintf(szTemp, "%sp_%d.txt", File::GetUserPath(D_DUMP_IDX).c_str(), pid);
+		sprintf(szTemp, "%sbad_p_%d.txt", File::GetUserPath(D_DUMP_IDX).c_str(), num_failures++);
 		std::ofstream file;
 		OpenFStream(file, szTemp, std::ios_base::out);
-		file << infoLog << s_glsl_header << vcode << s_glsl_header << pcode;
+		file << s_glsl_header << vcode << s_glsl_header << pcode << infoLog;
 		file.close();
+		
+		PanicAlert("Failed to link shaders!\nThis usually happens when trying to use Dolphin with an outdated GPU or integrated GPU like the Intel GMA series.\n\nIf you're sure this is Dolphin's error anyway, post the contents of %s along with this error message at the forums.\n\nDebug info (%s, %s, %s):\n%s",
+			szTemp,
+			g_ogl_config.gl_vendor,
+			g_ogl_config.gl_renderer,
+			g_ogl_config.gl_version,
+			infoLog);
+		
 		delete [] infoLog;
 	}
 	if (linkStatus != GL_TRUE)
@@ -326,6 +326,10 @@ GLuint ProgramShaderCache::CompileSingleShader (GLuint type, const char* code )
 	glGetShaderiv(result, GL_COMPILE_STATUS, &compileStatus);
 	GLsizei length = 0;
 	glGetShaderiv(result, GL_INFO_LOG_LENGTH, &length);
+
+	if (DriverDetails::HasBug(DriverDetails::BUG_BROKENINFOLOG))
+		length = 1024;
+
 	if (compileStatus != GL_TRUE || (length > 1 && DEBUG_GLSL))
 	{
 		GLsizei charsWritten;
@@ -333,11 +337,24 @@ GLuint ProgramShaderCache::CompileSingleShader (GLuint type, const char* code )
 		glGetShaderInfoLog(result, length, &charsWritten, infoLog);
 		ERROR_LOG(VIDEO, "PS Shader info log:\n%s", infoLog);
 		char szTemp[MAX_PATH];
-		sprintf(szTemp, "%sps_%d.txt", File::GetUserPath(D_DUMP_IDX).c_str(), result);
+		sprintf(szTemp, 
+			"%sbad_%s_%04i.txt", 
+			File::GetUserPath(D_DUMP_IDX).c_str(), 
+			type==GL_VERTEX_SHADER ? "vs" : "ps", 
+			num_failures++);
 		std::ofstream file;
 		OpenFStream(file, szTemp, std::ios_base::out);
-		file << infoLog << s_glsl_header << code;
+		file << s_glsl_header << code << infoLog;
 		file.close();
+		
+		PanicAlert("Failed to compile %s shader!\nThis usually happens when trying to use Dolphin with an outdated GPU or integrated GPU like the Intel GMA series.\n\nIf you're sure this is Dolphin's error anyway, post the contents of %s along with this error message at the forums.\n\nDebug info (%s, %s, %s):\n%s",
+			type==GL_VERTEX_SHADER ? "vertex" : "pixel",
+			szTemp,
+			g_ogl_config.gl_vendor,
+			g_ogl_config.gl_renderer,
+			g_ogl_config.gl_version,
+			infoLog);
+		
 		delete[] infoLog;
 	}
 	if (compileStatus != GL_TRUE)
@@ -353,27 +370,22 @@ GLuint ProgramShaderCache::CompileSingleShader (GLuint type, const char* code )
 	return result;
 }
 
-
-
-void ProgramShaderCache::GetShaderId ( SHADERUID* uid, DSTALPHA_MODE dstAlphaMode, u32 components )
+void ProgramShaderCache::GetShaderId(SHADERUID* uid, DSTALPHA_MODE dstAlphaMode, u32 components)
 {
-	GetPixelShaderId(&uid->puid, dstAlphaMode, components);
-	GetVertexShaderId(&uid->vuid, components);
+	GetPixelShaderUid(uid->puid, dstAlphaMode, API_OPENGL, components);
+	GetVertexShaderUid(uid->vuid, components, API_OPENGL);
+
+	if (g_ActiveConfig.bEnableShaderDebugging)
+	{
+		PixelShaderCode pcode;
+		GeneratePixelShaderCode(pcode, dstAlphaMode, API_OPENGL, components);
+		pixel_uid_checker.AddToIndexAndCheck(pcode, uid->puid, "Pixel", "p");
+
+		VertexShaderCode vcode;
+		GenerateVertexShaderCode(vcode, components, API_OPENGL);
+		vertex_uid_checker.AddToIndexAndCheck(vcode, uid->vuid, "Vertex", "v");
+	}
 }
-
-void ProgramShaderCache::GetSafeShaderId ( SHADERUIDSAFE* uid, DSTALPHA_MODE dstAlphaMode, u32 components )
-{
-	GetSafePixelShaderId(&uid->puid, dstAlphaMode, components);
-	GetSafeVertexShaderId(&uid->vuid, components);
-}
-
-void ProgramShaderCache::ValidateShaderIDs ( PCacheEntry *entry, DSTALPHA_MODE dstAlphaMode, u32 components )
-{
-	ValidateVertexShaderIDs(API_OPENGL, entry->safe_uid.vuid, entry->shader.strvprog, components);
-	ValidatePixelShaderIDs(API_OPENGL, entry->safe_uid.puid, entry->shader.strpprog, dstAlphaMode, components);
-}
-
-
 
 ProgramShaderCache::PCacheEntry ProgramShaderCache::GetShaderProgram(void)
 {
@@ -406,14 +418,14 @@ void ProgramShaderCache::Init(void)
 	}
 
 	// Read our shader cache, only if supported
-	if (g_ActiveConfig.backend_info.bSupportsGLSLCache)
+	if (g_ogl_config.bSupportsGLSLCache)
 	{
 		GLint Supported;
 		glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &Supported);
 		if(!Supported)
 		{
 			ERROR_LOG(VIDEO, "GL_ARB_get_program_binary is supported, but no binary format is known. So disable shader cache.");
-			g_ActiveConfig.backend_info.bSupportsGLSLCache = false;
+			g_ogl_config.bSupportsGLSLCache = false;
 		}
 		else
 		{
@@ -439,7 +451,7 @@ void ProgramShaderCache::Init(void)
 void ProgramShaderCache::Shutdown(void)
 {
 	// store all shaders in cache on disk
-	if (g_ActiveConfig.backend_info.bSupportsGLSLCache)
+	if (g_ogl_config.bSupportsGLSLCache)
 	{
 		PCache::iterator iter = pshaders.begin();
 		for (; iter != pshaders.end(); ++iter)
@@ -470,6 +482,9 @@ void ProgramShaderCache::Shutdown(void)
 		iter->second.Destroy();
 	pshaders.clear();
 
+	pixel_uid_checker.Invalidate();
+	vertex_uid_checker.Invalidate();
+
 	if (g_ActiveConfig.backend_info.bSupportsGLSLUBO)
 	{
 		delete s_buffer;
@@ -481,32 +496,18 @@ void ProgramShaderCache::Shutdown(void)
 
 void ProgramShaderCache::CreateHeader ( void )
 {
-#ifdef _WIN32
-	// Intel Windows driver has a issue:
-	// their glsl doesn't know about the ubo extension, so we can't load it.
-	// but as version 140, ubo is in core and don't have to be loaded in glsl.
-	// as sandy do ogl3.1, glsl 140 is supported, so force it in this way. 
-	// TODO: remove this again when the issue is fixed:
-	// see http://communities.intel.com/thread/36084
-	char *vendor = (char*)glGetString(GL_VENDOR);
-	bool glsl140_hack = strcmp(vendor, "Intel") == 0;
-#elif __APPLE__
-	// as apple doesn't support glsl130 at all, we also have to use glsl140
-	bool glsl140_hack = true;
-#else
-	bool glsl140_hack = false;
-#endif
-	
+	GLSL_VERSION v = g_ogl_config.eSupportedGLSLVersion;
 	snprintf(s_glsl_header, sizeof(s_glsl_header), 
 		"#version %s\n"
-		"%s\n" // tex_rect
+		"%s\n" // default precision
 		"%s\n" // ubo
+		"%s\n" // early-z
 		
 		"\n"// A few required defines and ones that will make our lives a lot easier
-		"#define ATTRIN in\n"
-		"#define ATTROUT out\n"
-		"#define VARYIN in\n"
-		"#define VARYOUT out\n"
+		"#define ATTRIN %s\n"
+		"#define ATTROUT %s\n"
+		"#define VARYIN %s\n"
+		"#define VARYOUT %s\n"
 
 		// Silly differences
 		"#define float2 vec2\n"
@@ -514,14 +515,42 @@ void ProgramShaderCache::CreateHeader ( void )
 		"#define float4 vec4\n"
 
 		// hlsl to glsl function translation
-		"#define frac(x) fract(x)\n"
-		"#define saturate(x) clamp(x, 0.0f, 1.0f)\n"
-		"#define lerp(x, y, z) mix(x, y, z)\n"
+		"#define frac fract\n"
+		"#define lerp mix\n"
+
+		// glsl 120 hack
+		"%s\n"
+		"%s\n"
+		"%s\n"
+		"%s\n"
+		"%s\n"
+		"#define COLOROUT(name) %s\n"
 		
+		// texture2d hack
+		"%s\n"
+		"%s\n"
+		"%s\n"
+				
+		, v==GLSLES3 ? "300 es" : v==GLSL_120 ? "120" : v==GLSL_130 ? "130" : v==GLSL_140 ? "140" : "150"
+		, v==GLSLES3 ? "precision highp float;" : ""
+		, g_ActiveConfig.backend_info.bSupportsGLSLUBO && v<GLSL_140 ? "#extension GL_ARB_uniform_buffer_object : enable" : ""
+		, g_ActiveConfig.backend_info.bSupportsEarlyZ ? "#extension GL_ARB_shader_image_load_store : enable" : ""
 		
-		, glsl140_hack ? "140" : "130"
-		, glsl140_hack ? "#define texture2DRect texture" : "#extension GL_ARB_texture_rectangle : enable"
-		, g_ActiveConfig.backend_info.bSupportsGLSLUBO && !glsl140_hack ? "#extension GL_ARB_uniform_buffer_object : enable" : "// ubo disabled"
+		, v==GLSL_120 ? "attribute" : "in"
+		, v==GLSL_120 ? "attribute" : "out"
+		, DriverDetails::HasBug(DriverDetails::BUG_BROKENCENTROID) ? "in" : v==GLSL_120 ? "varying" : "centroid in"
+		, DriverDetails::HasBug(DriverDetails::BUG_BROKENCENTROID) ? "out" : v==GLSL_120 ? "varying" : "centroid out"
+		
+		, v==GLSL_120 ? "#define texture texture2D" : ""
+		, v==GLSL_120 ? "#define round(x) floor((x)+0.5f)" : ""
+		, v==GLSL_120 ? "#define out " : ""
+		, v==GLSL_120 ? "#define ocol0 gl_FragColor" : ""
+		, v==GLSL_120 ? "#define ocol1 gl_FragColor" : "" //TODO: implement dual source blend
+		, v==GLSL_120 ? "" : "out vec4 name;"
+		
+		, v==GLSL_120 ? "#extension GL_ARB_texture_rectangle : enable" : ""
+		, v==GLSL_120 ? "" : "#define texture2DRect(samp, uv)  texelFetch(samp, ivec2(floor(uv)), 0)"
+		, v==GLSL_120 ? "" : "#define sampler2DRect sampler2D"
 	);
 }
 

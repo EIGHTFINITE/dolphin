@@ -1,19 +1,7 @@
-// Copyright (C) 2003 Dolphin Project.
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
 
 #include "Common.h"
 #include "CommonPaths.h"
@@ -124,7 +112,7 @@ bool Delete(const std::string &filename)
 	// being there, not the actual delete.
 	if (!Exists(filename))
 	{
-		WARN_LOG(COMMON, "Delete: %s does not exists", filename.c_str());
+		WARN_LOG(COMMON, "Delete: %s does not exist", filename.c_str());
 		return true;
 	}
 
@@ -190,7 +178,7 @@ bool CreateFullPath(const std::string &fullPath)
 {
 	int panicCounter = 100;
 	INFO_LOG(COMMON, "CreateFullPath: path %s", fullPath.c_str());
-		
+
 	if (File::Exists(fullPath))
 	{
 		INFO_LOG(COMMON, "CreateFullPath: path exists %s", fullPath.c_str());
@@ -206,7 +194,7 @@ bool CreateFullPath(const std::string &fullPath)
 		// we're done, yay!
 		if (position == fullPath.npos)
 			return true;
-		
+
 		// Include the '/' so the first call is CreateDir("/") rather than CreateDir("")
 		std::string const subPath(fullPath.substr(0, position + 1));
 		if (!File::IsDirectory(subPath))
@@ -216,7 +204,7 @@ bool CreateFullPath(const std::string &fullPath)
 		panicCounter--;
 		if (panicCounter <= 0)
 		{
-			ERROR_LOG(COMMON, "CreateFullPath: directory structure too deep");
+			ERROR_LOG(COMMON, "CreateFullPath: directory structure is too deep");
 			return false;
 		}
 		position++;
@@ -324,7 +312,7 @@ bool Copy(const std::string &srcFilename, const std::string &destFilename)
 			goto bail;
 		}
 	}
-	// close flushs
+	// close files
 	fclose(input);
 	fclose(output);
 	return true;
@@ -486,7 +474,7 @@ u32 ScanDirectoryTree(const std::string &directory, FSTEntry& parentEntry)
 	return foundEntries;
 }
 
-	
+
 // Deletes the given directory and anything under it. Returns true on success.
 bool DeleteDirRecursively(const std::string &directory)
 {
@@ -501,7 +489,7 @@ bool DeleteDirRecursively(const std::string &directory)
 		FindClose(hFind);
 		return false;
 	}
-		
+
 	// windows loop
 	do
 	{
@@ -532,7 +520,7 @@ bool DeleteDirRecursively(const std::string &directory)
 				#ifndef _WIN32
 				closedir(dirp);
 				#endif
-				
+
 				return false;
 			}
 		}
@@ -543,7 +531,7 @@ bool DeleteDirRecursively(const std::string &directory)
 				#ifndef _WIN32
 				closedir(dirp);
 				#endif
-				
+
 				return false;
 			}
 		}
@@ -605,7 +593,7 @@ std::string GetCurrentDir()
 	if (!(dir = __getcwd(NULL, 0))) {
 
 		ERROR_LOG(COMMON, "GetCurrentDirectory failed: %s",
-				  GetLastErrorMsg());
+				GetLastErrorMsg());
 		return NULL;
 	}
 	std::string strDir = dir;
@@ -669,7 +657,7 @@ std::string GetSysDirectory()
 
 // Returns a string with a Dolphin data dir or file in the user's home
 // directory. To be used in "multi-user" mode (that is, installed).
-std::string &GetUserPath(const unsigned int DirIDX, const std::string &newPath)
+const std::string& GetUserPath(const unsigned int DirIDX, const std::string &newPath)
 {
 	static std::string paths[NUM_PATH_INDICES];
 
@@ -723,11 +711,11 @@ std::string &GetUserPath(const unsigned int DirIDX, const std::string &newPath)
 	if (!newPath.empty())
 	{
 		if(DirIDX != D_WIIROOT_IDX)
-			PanicAlert("trying to change user path other than wii root");
+			PanicAlert("Trying to change user path other than Wii root");
 
 		if (!File::IsDirectory(newPath))
 		{
-			WARN_LOG(COMMON, "Invalid path specified %s, wii user path will be set to default", newPath.c_str());
+			WARN_LOG(COMMON, "Invalid path specified %s, Wii user path will be set to default", newPath.c_str());
 			paths[D_WIIROOT_IDX] = paths[D_USER_IDX] + WII_USER_DIR;
 		}
 		else
@@ -740,6 +728,19 @@ std::string &GetUserPath(const unsigned int DirIDX, const std::string &newPath)
 		paths[F_WIISYSCONF_IDX]	= paths[D_WIISYSCONF_IDX] + WII_SYSCONF;
 	}
 	return paths[DirIDX];
+}
+
+std::string GetThemeDir(const std::string& theme_name)
+{
+	std::string dir = File::GetUserPath(D_THEMES_IDX) + theme_name + "/";
+
+#if !defined(_WIN32)
+	// If theme does not exist in user's dir load from shared directory
+	if (!File::Exists(dir))
+		dir = SHARED_USER_DIR THEMES_DIR "/" + theme_name + "/";
+#endif
+	
+	return dir;
 }
 
 bool WriteStringToFile(bool text_file, const std::string &str, const char *filename)
@@ -849,7 +850,7 @@ bool IOFile::Seek(s64 off, int origin)
 }
 
 u64 IOFile::Tell()
-{	
+{
 	if (IsOpen())
 		return ftello(m_file);
 	else

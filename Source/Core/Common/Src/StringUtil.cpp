@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -47,7 +34,39 @@ bool AsciiToHex(const char* _szValue, u32& result)
 
 bool CharArrayFromFormatV(char* out, int outsize, const char* format, va_list args)
 {
-	int writtenCount = vsnprintf(out, outsize, format, args);
+	int writtenCount;
+
+#ifdef _WIN32
+	// You would think *printf are simple, right? Iterate on each character,
+	// if it's a format specifier handle it properly, etc.
+	//
+	// Nooooo. Not according to the C standard.
+	//
+	// According to the C99 standard (7.19.6.1 "The fprintf function")
+	//     The format shall be a multibyte character sequence
+	//
+	// Because some character encodings might have '%' signs in the middle of
+	// a multibyte sequence (SJIS for example only specifies that the first
+	// byte of a 2 byte sequence is "high", the second byte can be anything),
+	// printf functions have to decode the multibyte sequences and try their
+	// best to not screw up.
+	//
+	// Unfortunately, on Windows, the locale for most languages is not UTF-8
+	// as we would need. Notably, for zh_TW, Windows chooses EUC-CN as the
+	// locale, and completely fails when trying to decode UTF-8 as EUC-CN.
+	//
+	// On the other hand, the fix is simple: because we use UTF-8, no such
+	// multibyte handling is required as we can simply assume that no '%' char
+	// will be present in the middle of a multibyte sequence.
+	//
+	// This is why we lookup an ANSI (cp1252) locale here and use _vsnprintf_l.
+	static locale_t c_locale = NULL;
+	if (!c_locale)
+		c_locale = _create_locale(LC_ALL, ".1252");
+	writtenCount = _vsnprintf_l(out, outsize, format, c_locale, args);
+#else
+	writtenCount = vsnprintf(out, outsize, format, args);
+#endif
 
 	if (writtenCount > 0 && writtenCount < outsize)
 	{
@@ -71,10 +90,9 @@ std::string StringFromFormat(const char* format, ...)
 	va_start(args, format);
 	required = _vscprintf(format, args);
 	buf = new char[required + 1];
-	vsnprintf(buf, required, format, args);
+	CharArrayFromFormatV(buf, required + 1, format, args);
 	va_end(args);
 
-	buf[required] = '\0';
 	std::string temp = buf;
 	delete[] buf;
 #else
@@ -435,10 +453,9 @@ template <typename T>
 std::string CodeToUTF8(const char* fromcode, const std::basic_string<T>& input)
 {
 	std::string result;
-	
+
 #if defined(ANDROID)
-	result = "Not implemented on Android!";
-	
+	result = (char*)input.c_str();
 #else
 	iconv_t const conv_desc = iconv_open("UTF-8", fromcode);
 	if ((iconv_t)-1 == conv_desc)
@@ -449,7 +466,7 @@ std::string CodeToUTF8(const char* fromcode, const std::basic_string<T>& input)
 	{
 		size_t const in_bytes = sizeof(T) * input.size();
 		size_t const out_buffer_size = 4 * in_bytes;
-		
+
 		std::string out_buffer;
 		out_buffer.resize(out_buffer_size);
 
@@ -457,12 +474,12 @@ std::string CodeToUTF8(const char* fromcode, const std::basic_string<T>& input)
 		size_t src_bytes = in_bytes;
 		auto dst_buffer = &out_buffer[0];
 		size_t dst_bytes = out_buffer.size();
-		
+
 		while (src_bytes != 0)
 		{
 			size_t const iconv_result = iconv(conv_desc, (char**)(&src_buffer), &src_bytes,
 				&dst_buffer, &dst_bytes);
-			
+
 			if ((size_t)-1 == iconv_result)
 			{
 				if (EILSEQ == errno || EINVAL == errno)
@@ -512,7 +529,7 @@ std::string UTF16ToUTF8(const std::wstring& input)
 	//	CodeToUTF8("UCS-2LE", input);
 	//	CodeToUTF8("UTF-16", input);
 		CodeToUTF8("UTF-16LE", input);
-	
+
 	// TODO: why is this needed?
 	result.erase(std::remove(result.begin(), result.end(), 0x00), result.end());
 	return result;

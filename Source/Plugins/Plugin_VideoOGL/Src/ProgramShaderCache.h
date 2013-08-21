@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #ifndef PROGRAM_SHADER_CACHE_H_
 #define PROGRAM_SHADER_CACHE_H_
@@ -29,18 +16,17 @@
 namespace OGL
 {
 
-template<bool safe>
-class _SHADERUID
+class SHADERUID
 {
 public:
-	_VERTEXSHADERUID<safe> vuid;
-	_PIXELSHADERUID<safe> puid;
+	VertexShaderUid vuid;
+	PixelShaderUid puid;
 
-	_SHADERUID() {}
+	SHADERUID() {}
 
-	_SHADERUID(const _SHADERUID& r) : vuid(r.vuid), puid(r.puid) {}
+	SHADERUID(const SHADERUID& r) : vuid(r.vuid), puid(r.puid) {}
 
-	bool operator <(const _SHADERUID& r) const
+	bool operator <(const SHADERUID& r) const
 	{
 		if(puid < r.puid) return true;
 		if(r.puid < puid) return false;
@@ -48,13 +34,11 @@ public:
 		return false;
 	}
 
-	bool operator ==(const _SHADERUID& r) const
+	bool operator ==(const SHADERUID& r) const
 	{
 		return puid == r.puid && vuid == r.vuid;
 	}
 };
-typedef _SHADERUID<false> SHADERUID;
-typedef _SHADERUID<true> SHADERUIDSAFE;
 
 
 const int NUM_UNIFORMS = 19;
@@ -85,7 +69,6 @@ public:
 	struct PCacheEntry
 	{
 		SHADER shader;
-		SHADERUIDSAFE safe_uid;
 		bool in_cache;
 
 		void Destroy()
@@ -94,12 +77,12 @@ public:
 		}
 	};
 
+	typedef std::map<SHADERUID, PCacheEntry> PCache;
+
 	static PCacheEntry GetShaderProgram(void);
 	static GLuint GetCurrentProgram(void);
 	static SHADER* SetShader(DSTALPHA_MODE dstAlphaMode, u32 components);
 	static void GetShaderId(SHADERUID *uid, DSTALPHA_MODE dstAlphaMode, u32 components);
-	static void GetSafeShaderId(SHADERUIDSAFE *uid, DSTALPHA_MODE dstAlphaMode, u32 components);
-	static void ValidateShaderIDs(PCacheEntry *entry, DSTALPHA_MODE dstAlphaMode, u32 components);
 	
 	static bool CompileShader(SHADER &shader, const char* vcode, const char* pcode);
 	static GLuint CompileSingleShader(GLuint type, const char *code);
@@ -119,11 +102,12 @@ private:
 		void Read(const SHADERUID &key, const u8 *value, u32 value_size);
 	};
 
-	typedef std::map<SHADERUID, PCacheEntry> PCache;
-
 	static PCache pshaders;
 	static PCacheEntry* last_entry;
 	static SHADERUID last_uid;
+
+	static UidChecker<PixelShaderUid,PixelShaderCode> pixel_uid_checker;
+	static UidChecker<VertexShaderUid,VertexShaderCode> vertex_uid_checker;
 
 	static GLintptr s_vs_data_size;
 	static GLintptr s_ps_data_size;

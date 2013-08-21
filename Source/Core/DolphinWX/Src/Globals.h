@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 
 // This file holds global data for DolphinWx and DebuggerWx
@@ -38,7 +25,7 @@ enum
 {
 	IDM_LOADSTATE = 200, // File menu
 	IDM_SAVESTATE,
-	IDM_LOADLASTSTATE,
+	IDM_SAVEFIRSTSTATE,
 	IDM_UNDOLOADSTATE,
 	IDM_UNDOSAVESTATE,
 	IDM_LOADSTATEFILE,
@@ -51,6 +38,8 @@ enum
 	IDM_SAVESLOT6,
 	IDM_SAVESLOT7,
 	IDM_SAVESLOT8,
+	IDM_SAVESLOT9,
+	IDM_SAVESLOT10,
 	IDM_LOADSLOT1,
 	IDM_LOADSLOT2,
 	IDM_LOADSLOT3,
@@ -59,6 +48,16 @@ enum
 	IDM_LOADSLOT6,
 	IDM_LOADSLOT7,
 	IDM_LOADSLOT8,
+	IDM_LOADSLOT9,
+	IDM_LOADSLOT10,
+	IDM_LOADLAST1,
+	IDM_LOADLAST2,
+	IDM_LOADLAST3,
+	IDM_LOADLAST4,
+	IDM_LOADLAST5,
+	IDM_LOADLAST6,
+	IDM_LOADLAST7,
+	IDM_LOADLAST8,
 	IDM_FRAMESKIP0,
 	IDM_FRAMESKIP1,
 	IDM_FRAMESKIP2,
@@ -102,6 +101,7 @@ enum
 	IDM_CONNECT_WIIMOTE2,
 	IDM_CONNECT_WIIMOTE3,
 	IDM_CONNECT_WIIMOTE4,
+	IDM_CONNECT_BALANCEBOARD,
 
 	IDM_LISTWAD,
 	IDM_LISTWII,
@@ -185,7 +185,7 @@ enum
 	IDM_LOADMAPFILE,
 	IDM_SAVEMAPFILE, IDM_SAVEMAPFILEWITHCODES,
 	IDM_CREATESIGNATUREFILE,
-    IDM_RENAME_SYMBOLS,
+	IDM_RENAME_SYMBOLS,
 	IDM_USESIGNATUREFILE,
 	IDM_PATCHHLEFUNCTIONS,
 
