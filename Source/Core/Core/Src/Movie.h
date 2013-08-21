@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #ifndef __MOVIE_H
 #define __MOVIE_H
@@ -86,19 +73,19 @@ struct DTMHeader {
 	u8 gameID[6];			// The Game ID
 	bool bWii;				// Wii game
 
-    u8  numControllers;		// The number of connected controllers (1-4)
+	u8  numControllers;		// The number of connected controllers (1-4)
 
-    bool bFromSaveState;	// false indicates that the recording started from bootup, true for savestate
-    u64 frameCount;			// Number of frames in the recording
+	bool bFromSaveState;	// false indicates that the recording started from bootup, true for savestate
+	u64 frameCount;			// Number of frames in the recording
 	u64 inputCount;			// Number of input frames in recording
-    u64 lagCount;			// Number of lag frames in the recording
-    u64 uniqueID;			// (not implemented) A Unique ID comprised of: md5(time + Game ID)
-    u32 numRerecords;		// Number of rerecords/'cuts' of this TAS
-    u8  author[32];			// Author's name (encoded in UTF-8)
+	u64 lagCount;			// Number of lag frames in the recording
+	u64 uniqueID;			// (not implemented) A Unique ID comprised of: md5(time + Game ID)
+	u32 numRerecords;		// Number of rerecords/'cuts' of this TAS
+	u8  author[32];			// Author's name (encoded in UTF-8)
 
-    u8  videoBackend[16];	// UTF-8 representation of the video backend
-    u8  audioEmulator[16];	// UTF-8 representation of the audio emulator
-    unsigned char  md5[16];	// MD5 of game iso
+	u8  videoBackend[16];	// UTF-8 representation of the video backend
+	u8  audioEmulator[16];	// UTF-8 representation of the audio emulator
+	unsigned char  md5[16];	// MD5 of game iso
 
 	u64 recordingStartTime; // seconds since 1970 that recording started (used for RTC)
 
@@ -119,7 +106,8 @@ struct DTMHeader {
 	bool bMemcard;
 	bool bClearSave;		// Create a new memory card when playing back a movie if true
 	u8 bongos;
-	u8 reserved[15];		// Padding for any new config options
+	bool bSyncGPU;
+	u8 reserved[14];		// Padding for any new config options
 	u8 discChange[40];		// Name of iso file to switch to, for two disc games.
 	u8 revision[20];		// Git hash
 	u8 reserved2[27];		// Make heading 256 bytes, just because we can
@@ -151,6 +139,7 @@ bool IsFastDiscSpeed();
 int GetCPUMode();
 bool IsStartingFromClearSave();
 bool IsUsingMemcard();
+bool IsSyncGPU();
 void SetGraphicsConfig();
 void GetSettings();
 

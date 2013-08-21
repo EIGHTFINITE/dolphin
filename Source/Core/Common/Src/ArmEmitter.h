@@ -136,7 +136,7 @@ protected:
 	u32 Value;
 
 private:
-	OpType Type;	
+	OpType Type;
 
 	// IMM types
 	u8	Rotation; // Only for u8 values
@@ -154,7 +154,7 @@ public:
 	{ 
 		Type = type; 
 		Value = imm; 
-		Rotation = 0;		
+		Rotation = 0;
 	}
 
 	Operand2(ARMReg Reg)
@@ -297,7 +297,7 @@ public:
 	u32 Imm24()
 	{
 		_assert_msg_(DYNA_REC, (Type == TYPE_IMM), "Imm16 not IMM");
-		return (Value & 0x0FFFFFFF);	
+		return (Value & 0x0FFFFFFF);
 	}
 	// NEON and ASIMD specific
 	u32 Imm8ASIMD()
@@ -320,6 +320,9 @@ bool TryMakeOperand2(u32 imm, Operand2 &op2);
 bool TryMakeOperand2_AllowInverse(u32 imm, Operand2 &op2, bool *inverse);
 bool TryMakeOperand2_AllowNegation(s32 imm, Operand2 &op2, bool *negated);
 
+// Use this only when you know imm can be made into an Operand2.
+Operand2 AssumeMakeOperand2(u32 imm);
+
 inline Operand2 R(ARMReg Reg)	{ return Operand2(Reg, TYPE_REG); }
 inline Operand2 IMM(u32 Imm)	{ return Operand2(Imm, TYPE_IMM); }
 inline Operand2 Mem(void *ptr)	{ return Operand2((u32)ptr, TYPE_IMM); }
@@ -336,9 +339,9 @@ struct FixupBranch
 
 struct LiteralPool
 {
-    s32 loc;
-    u8* ldr_address;
-    u32 val;
+	s32 loc;
+	u8* ldr_address;
+	u32 val;
 };
 
 typedef const u8* JumpTarget;
@@ -358,6 +361,10 @@ private:
 	void WriteShiftedDataOp(u32 op, bool SetFlags, ARMReg dest, ARMReg src, Operand2 op2);
 	void WriteSignedMultiply(u32 Op, u32 Op2, u32 Op3, ARMReg dest, ARMReg r1, ARMReg r2);
 
+	u32 EncodeVd(ARMReg Vd);
+	u32 EncodeVn(ARMReg Vn);
+	u32 EncodeVm(ARMReg Vm);
+	void WriteVFPDataOp(u32 Op, ARMReg Vd, ARMReg Vn, ARMReg Vm);
 
 	void Write4OpMultiply(u32 op, ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
 
@@ -390,6 +397,7 @@ public:
 
 	void FlushLitPool();
 	void AddNewLit(u32 val);
+	bool TrySetValue_TwoOp(ARMReg reg, u32 val);
 
 	CCFlags GetCC() { return CCFlags(condition >> 28); }
 	void SetCC(CCFlags cond = CC_AL);
@@ -403,10 +411,10 @@ public:
 
 	// Hint instruction
 	void YIELD();
-	
+
 	// Do nothing
 	void NOP(int count = 1); //nop padding - TODO: fast nop slides, for amd and intel (check their manuals)
-	
+
 #ifdef CALL
 #undef CALL
 #endif
@@ -418,11 +426,12 @@ public:
 	FixupBranch BL();
 	FixupBranch BL_CC(CCFlags Cond);
 	void SetJumpTarget(FixupBranch const &branch);
-	
+
 	void B (const void *fnptr);
 	void B (ARMReg src);
 	void BL(const void *fnptr);
 	void BL(ARMReg src);
+	bool BLInRange(const void *fnptr);
 
 	void PUSH(const int num, ...);
 	void POP(const int num, ...);
@@ -445,6 +454,8 @@ public:
 	void LSLS(ARMReg dest, ARMReg src, Operand2 op2);
 	void LSLS(ARMReg dest, ARMReg src, ARMReg op2);
 	void LSR (ARMReg dest, ARMReg src, Operand2 op2);
+	void ASR (ARMReg dest, ARMReg src, Operand2 op2);
+	void ASRS(ARMReg dest, ARMReg src, Operand2 op2);
 	void SBC (ARMReg dest, ARMReg src, Operand2 op2);
 	void SBCS(ARMReg dest, ARMReg src, Operand2 op2);
 	void RBIT(ARMReg dest, ARMReg src);
@@ -464,7 +475,7 @@ public:
 	void BICS(ARMReg dest, ARMReg src, Operand2 op2);
 	void MVN (ARMReg dest,             Operand2 op2);
 	void MVNS(ARMReg dest,             Operand2 op2);
-	void MOVW(ARMReg dest, 			   Operand2 op2);
+	void MOVW(ARMReg dest,             Operand2 op2);
 	void MOVT(ARMReg dest, Operand2 op2, bool TopBits = false);
 
 	// UDIV and SDIV are only available on CPUs that have 
@@ -476,6 +487,7 @@ public:
 	void MULS(ARMReg dest,	ARMReg src, ARMReg op2);
 
 	void UMULL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
+	void UMULLS(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
 	void SMULL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
 
 	void UMLAL(ARMReg destLo, ARMReg destHi, ARMReg rn, ARMReg rm);
@@ -506,7 +518,7 @@ public:
 
 	void STMFD(ARMReg dest, bool WriteBack, const int Regnum, ...);
 	void LDMFD(ARMReg dest, bool WriteBack, const int Regnum, ...);
-	
+
 	// Exclusive Access operations
 	void LDREX(ARMReg dest, ARMReg base);
 	// result contains the result if the instruction managed to store the value
@@ -522,18 +534,25 @@ public:
 	// Subtracts the base from the register to give us the real one
 	ARMReg SubBase(ARMReg Reg);	
 	// NEON Only
+	void VABD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm);
 	void VADD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm);
 	void VSUB(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm);
-		
+
 	// VFP Only
 	void VLDR(ARMReg Dest, ARMReg Base, s16 offset);
 	void VSTR(ARMReg Src,  ARMReg Base, s16 offset);
-	void VCMP(ARMReg Vd, ARMReg Vm, bool E);
+	void VCMP(ARMReg Vd, ARMReg Vm);
+	void VCMPE(ARMReg Vd, ARMReg Vm);
 	// Compares against zero
-	void VCMP(ARMReg Vd, bool E);
+	void VCMP(ARMReg Vd);
+	void VCMPE(ARMReg Vd);
+
+	void VNMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VNMLS(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VNMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm);
 	void VDIV(ARMReg Vd, ARMReg Vn, ARMReg Vm);
 	void VSQRT(ARMReg Vd, ARMReg Vm);
-	
+
 	// NEON and VFP
 	void VADD(ARMReg Vd, ARMReg Vn, ARMReg Vm);
 	void VSUB(ARMReg Vd, ARMReg Vn, ARMReg Vm);
@@ -541,6 +560,8 @@ public:
 	void VNEG(ARMReg Vd, ARMReg Vm);
 	void VMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm);
 	void VMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VMLS(ARMReg Vd, ARMReg Vn, ARMReg Vm);
+	void VMOV(ARMReg Dest, Operand2 op2);
 	void VMOV(ARMReg Dest, ARMReg Src, bool high);
 	void VMOV(ARMReg Dest, ARMReg Src);
 	void VCVT(ARMReg Dest, ARMReg Src, int flags);
@@ -553,9 +574,11 @@ public:
 
 	// Wrapper around MOVT/MOVW with fallbacks.
 	void MOVI2R(ARMReg reg, u32 val, bool optimize = true);
-	void MOVI2F(ARMReg dest, float val, ARMReg tempReg);
+	void MOVI2F(ARMReg dest, float val, ARMReg tempReg, bool negate = false);
 
+	void ADDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch);
 	void ANDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch);
+	void CMPI2R(ARMReg rs, u32 val, ARMReg scratch);
 	void ORI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch);
 
 
@@ -611,7 +634,11 @@ public:
 	// Start over if you need to change the code (call FreeCodeSpace(), AllocCodeSpace()).
 	void WriteProtect()
 	{
-		WriteProtectMemory(region, region_size, true);		
+		WriteProtectMemory(region, region_size, true);
+	}
+	void UnWriteProtect()
+	{
+		UnWriteProtectMemory(region, region_size, false);
 	}
 
 	void ResetCodePtr()
@@ -623,7 +650,23 @@ public:
 	{
 		return region_size - (GetCodePtr() - region);
 	}
+
+	u8 *GetBasePtr() {
+		return region;
+	}
+
+	size_t GetOffset(u8 *ptr) {
+		return ptr - region;
+	}
 };
+
+// VFP Specific
+struct VFPEnc {
+	s16 opc1;
+	s16 opc2;
+};
+extern const VFPEnc VFPOps[16][2];
+extern const char *VFPOpNames[16];
 
 }  // namespace
 

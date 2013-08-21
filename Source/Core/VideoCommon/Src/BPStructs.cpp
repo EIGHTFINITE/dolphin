@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include <cmath>
 
@@ -115,7 +102,9 @@ void BPWritten(const BPCmd& bp)
 		if (!mapTexFound)
 		{
 			if (bp.address != BPMEM_TEV_COLOR_ENV && bp.address != BPMEM_TEV_ALPHA_ENV)
+			{
 				numWrites = 0;
+			}
 			else if (++numWrites >= 100)	// seem that if 100 consecutive BP writes are called to either of these addresses in ZTP, 
 			{								// then it is safe to assume the map texture address is currently loaded into the BP memory
 				mapTexAddress = bpmem.tex[0].texImage3[0].hex << 5;
@@ -160,11 +149,14 @@ void BPWritten(const BPCmd& bp)
 	{
 	case BPMEM_GENMODE: // Set the Generation Mode
 		{
-			PRIM_LOG("genmode: texgen=%d, col=%d, ms_en=%d, tev=%d, cullmode=%d, ind=%d, zfeeze=%d",
+			PRIM_LOG("genmode: texgen=%d, col=%d, multisampling=%d, tev=%d, cullmode=%d, ind=%d, zfeeze=%d",
 			bpmem.genMode.numtexgens, bpmem.genMode.numcolchans,
-			bpmem.genMode.ms_en, bpmem.genMode.numtevstages+1, bpmem.genMode.cullmode,
+			bpmem.genMode.multisampling, bpmem.genMode.numtevstages+1, bpmem.genMode.cullmode,
 			bpmem.genMode.numindstages, bpmem.genMode.zfreeze);
-			SetGenerationMode();
+
+			// Only call SetGenerationMode when cull mode changes.
+			if (bp.changes & 0xC000)
+				SetGenerationMode();
 			break;
 		}
 	case BPMEM_IND_MTXA: // Index Matrix Changed
@@ -206,15 +198,19 @@ void BPWritten(const BPCmd& bp)
 				PRIM_LOG("blendmode: en=%d, open=%d, colupd=%d, alphaupd=%d, dst=%d, src=%d, sub=%d, mode=%d", 
 					bpmem.blendmode.blendenable, bpmem.blendmode.logicopenable, bpmem.blendmode.colorupdate, bpmem.blendmode.alphaupdate,
 					bpmem.blendmode.dstfactor, bpmem.blendmode.srcfactor, bpmem.blendmode.subtract, bpmem.blendmode.logicmode);
+
 				// Set LogicOp Blending Mode
 				if (bp.changes & 2)
 					SetLogicOpMode();
+
 				// Set Dithering Mode
 				if (bp.changes & 4)
 					SetDitherMode();
+
 				// Set Blending Mode
 				if (bp.changes & 0xFF1)
 					SetBlendMode();
+
 				// Set Color Mask
 				if (bp.changes & 0x18)
 					SetColorMask();
@@ -363,6 +359,7 @@ void BPWritten(const BPCmd& bp)
 		PRIM_LOG("alphacmp: ref0=%d, ref1=%d, comp0=%d, comp1=%d, logic=%d", bpmem.alpha_test.ref0,
 				bpmem.alpha_test.ref1, bpmem.alpha_test.comp0, bpmem.alpha_test.comp1, bpmem.alpha_test.logic);
 		PixelShaderManager::SetAlpha(bpmem.alpha_test);
+		g_renderer->SetColorMask();
 		break;
 	case BPMEM_BIAS: // BIAS
 		PRIM_LOG("ztex bias=0x%x", bpmem.ztex1.bias);
@@ -426,31 +423,34 @@ void BPWritten(const BPCmd& bp)
 	case BPMEM_CLEARBBOX1:
 	case BPMEM_CLEARBBOX2:
 		{
-		if(g_ActiveConfig.bUseBBox)
-		{
-			// Don't compute bounding box if this frame is being skipped!
-			// Wrong but valid values are better than bogus values...
-			if(g_bSkipCurrentFrame)
-				break;
+			if(g_ActiveConfig.bUseBBox)
+			{
+				// Don't compute bounding box if this frame is being skipped!
+				// Wrong but valid values are better than bogus values...
+				if(g_bSkipCurrentFrame)
+					break;
 
-			if (bp.address == BPMEM_CLEARBBOX1) {
-				int right = bp.newvalue >> 10;
-				int left = bp.newvalue & 0x3ff;
+				if (bp.address == BPMEM_CLEARBBOX1)
+				{
+					int right = bp.newvalue >> 10;
+					int left = bp.newvalue & 0x3ff;
 			
-				// We should only set these if bbox is calculated properly.
-				PixelEngine::bbox[0] = left;
-				PixelEngine::bbox[1] = right;
-				PixelEngine::bbox_active = true;
-			} else {
-				int bottom = bp.newvalue >> 10;
-				int top = bp.newvalue & 0x3ff;
+					// We should only set these if bbox is calculated properly.
+					PixelEngine::bbox[0] = left;
+					PixelEngine::bbox[1] = right;
+					PixelEngine::bbox_active = true;
+				}
+				else
+				{
+					int bottom = bp.newvalue >> 10;
+					int top = bp.newvalue & 0x3ff;
 
-				// We should only set these if bbox is calculated properly.
-				PixelEngine::bbox[2] = top;
-				PixelEngine::bbox[3] = bottom;
-				PixelEngine::bbox_active = true;
+					// We should only set these if bbox is calculated properly.
+					PixelEngine::bbox[2] = top;
+					PixelEngine::bbox[3] = bottom;
+					PixelEngine::bbox_active = true;
+				}
 			}
-		}
 		}
 		break;
 	case BPMEM_TEXINVALIDATE:
@@ -459,7 +459,8 @@ void BPWritten(const BPCmd& bp)
 
 	case BPMEM_ZCOMPARE:      // Set the Z-Compare and EFB pixel format
 		OnPixelFormatChange();
-		if(bp.changes & 7) {
+		if(bp.changes & 7)
+		{
 			SetBlendMode(); // dual source could be activated by changing to PIXELFMT_RGBA6_Z24
 			g_renderer->SetColorMask(); // alpha writing needs to be disabled if the new pixel format doesn't have an alpha channel
 		}

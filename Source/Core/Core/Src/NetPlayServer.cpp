@@ -1,47 +1,41 @@
-#include "NetPlay.h"
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
-// called from ---GUI--- thread
+#include "NetPlayServer.h"
+
+NetPlayServer::Client::Client()
+{
+	memset(pad_map, -1, sizeof(pad_map));
+}
+
 NetPlayServer::~NetPlayServer()
 {
 	if (is_connected)
 	{
 		m_do_loop = false;
 		m_thread.join();
-	}	
+		m_socket.Close();
+	}
+
+#ifdef USE_UPNP
+	if (m_upnp_thread.joinable())
+		m_upnp_thread.join();
+	m_upnp_thread = std::thread(&NetPlayServer::unmapPortThread);
+	m_upnp_thread.join();
+#endif
 }
 
 // called from ---GUI--- thread
-NetPlayServer::NetPlayServer(const u16 port, const std::string& name, NetPlayUI* dialog, const std::string& game) : NetPlay(dialog)
+NetPlayServer::NetPlayServer(const u16 port) : is_connected(false), m_is_running(false)
 {
-	m_selected_game = game;
-
-	m_update_pings = true;
-
 	if (m_socket.Listen(port))
 	{
-		Client player;
-		player.pid = 0;
-		player.revision = netplay_dolphin_ver;
-		player.socket = m_socket;
-		player.name = name;
-
-		// map local pad 1 to game pad 1
-		player.pad_map[0] = 0;
-
-		// add self to player list
-		m_players[m_socket] = player;
-		m_local_player = &m_players[m_socket];
-		//PanicAlertT("Listening");
-
-		m_dialog->Update();
-
 		is_connected = true;
-
+		m_do_loop = true;
 		m_selector.Add(m_socket);
 		m_thread = std::thread(std::mem_fun(&NetPlayServer::ThreadFunc), this);
 	}
-	else
-		is_connected = false;
 }
 
 // called from ---NETPLAY--- thread
@@ -52,7 +46,7 @@ void NetPlayServer::ThreadFunc()
 		// update pings every so many seconds
 		if ((m_ping_timer.GetTimeElapsed() > (10 * 1000)) || m_update_pings)
 		{
-			//PanicAlertT("sending pings");
+			//PanicAlertT("Sending pings");
 
 			m_ping_key = Common::Timer::GetTimeMs();
 
@@ -103,7 +97,7 @@ void NetPlayServer::ThreadFunc()
 				switch (ready_socket.Receive(rpac))
 				{
 				case sf::Socket::Done :
-					// if a bad packet is recieved, disconnect the client
+					// if a bad packet is received, disconnect the client
 					if (0 == OnData(rpac, ready_socket))
 						break;
 
@@ -218,10 +212,13 @@ unsigned int NetPlayServer::OnConnect(sf::SocketTCP& socket)
 	socket.Send(spac);
 
 	// send new client the selected game
-	spac.Clear();
-	spac << (MessageId)NP_MSG_CHANGE_GAME;
-	spac << m_selected_game;
-	socket.Send(spac);
+	if (m_selected_game != "")
+	{
+		spac.Clear();
+		spac << (MessageId)NP_MSG_CHANGE_GAME;
+		spac << m_selected_game;
+		socket.Send(spac);
+	}
 
 	// sync values with new client
 	for (i = m_players.begin(); i!=e; ++i)
@@ -246,8 +243,6 @@ unsigned int NetPlayServer::OnConnect(sf::SocketTCP& socket)
 	// add client to selector/ used for receiving
 	m_selector.Add(socket);
 
-	m_dialog->Update();
-
 	return 0;
 }
 
@@ -259,11 +254,10 @@ unsigned int NetPlayServer::OnDisconnect(sf::SocketTCP& socket)
 		PanicAlertT("Client disconnect while game is running!! NetPlay is disabled. You must manually stop the game.");
 		std::lock_guard<std::recursive_mutex> lkg(m_crit.game);
 		m_is_running = false;
-		NetPlay_Disable();
 
 		sf::Packet spac;
 		spac << (MessageId)NP_MSG_DISABLE_GAME;
-		// this thread doesnt need players lock
+		// this thread doesn't need players lock
 		std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 		SendToClients(spac);
 	}
@@ -280,8 +274,6 @@ unsigned int NetPlayServer::OnDisconnect(sf::SocketTCP& socket)
 	// alert other players of disconnect
 	std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 	SendToClients(spac);
-
-	m_dialog->Update();
 
 	return 0;
 }
@@ -345,8 +337,6 @@ bool NetPlayServer::SetPadMapping(const int pid, const int map[])
 	std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 	UpdatePadMapping();	// sync pad mappings with everyone
 
-	m_dialog->Update();
-
 	return true;
 }
 
@@ -366,29 +356,6 @@ void NetPlayServer::UpdatePadMapping()
 		SendToClients(spac);
 	}
 
-}
-
-// called from ---GUI--- thread and ---NETPLAY--- thread
-u64 NetPlayServer::CalculateMinimumBufferTime()
-{
-	std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
-
-	std::map<sf::SocketTCP, Client>::const_iterator
-		i = m_players.begin(),
-		e = m_players.end();
-	std::priority_queue<unsigned int>	pings;
-	for ( ;i!=e; ++i)
-		pings.push(i->second.ping/2);
-
-	unsigned int required_ms = pings.top();
-	// if there is more than 1 client, buffersize must be >= (2 highest ping times combined)
-	if (pings.size() > 1)
-	{
-		pings.pop();
-		required_ms += pings.top();
-	}
-
-	return required_ms;
 }
 
 // called from ---GUI--- thread and ---NETPLAY--- thread
@@ -435,12 +402,6 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, sf::SocketTCP& socket)
 			std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 			SendToClients(spac, player.pid);
 			}
-
-			// add to gui
-			std::ostringstream ss;
-			ss << player.name << '[' << (char)(player.pid+'0') << "]: " << msg;
-
-			m_dialog->AppendChat(ss.str());
 		}
 		break;
 
@@ -451,8 +412,8 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, sf::SocketTCP& socket)
 				break;
 
 			PadMapping map = 0;
-			NetPad np;
-			packet >> map >> np.nHi >> np.nLo;
+			int hi, lo;
+			packet >> map >> hi >> lo;
 
 			// check if client's pad indeed maps in game
 			if (map >= 0 && map < 4)
@@ -461,18 +422,16 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, sf::SocketTCP& socket)
 				map = -1;
 			
 			// if not, they are hacking, so disconnect them
-			// this could happen right after a pad map change, but that isn't implimented yet
+			// this could happen right after a pad map change, but that isn't implemented yet
 			if (map < 0)
 				return 1;
 				
-			// add to pad buffer
-			m_pad_buffer[(unsigned)map].Push(np);
 
 			// relay to clients
 			sf::Packet spac;
 			spac << (MessageId)NP_MSG_PAD_DATA;
 			spac << map;	// in game mapping
-			spac << np.nHi << np.nLo;
+			spac << hi << lo;
 
 			std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 			SendToClients(spac, player.pid);
@@ -486,11 +445,15 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, sf::SocketTCP& socket)
 			packet >> ping_key;
 
 			if (m_ping_key == ping_key)
-			{
-				//PanicAlertT("good pong");
 				player.ping = ping;
-			}
-			m_dialog->Update();
+
+			sf::Packet spac;
+			spac << (MessageId)NP_MSG_PLAYER_PING_DATA;
+			spac << player.pid;
+			spac << player.ping;
+
+			std::lock_guard<std::recursive_mutex> lks(m_crit.send);
+			SendToClients(spac);
 		}
 		break;
 
@@ -508,25 +471,6 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, sf::SocketTCP& socket)
 	}
 
 	return 0;
-}
-
-// called from ---GUI--- thread
-void NetPlayServer::GetPlayerList(std::string& list, std::vector<int>& pid_list)
-{
-	std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
-
-	std::ostringstream ss;
-
-	std::map<sf::SocketTCP, Client>::const_iterator
-		i = m_players.begin(),
-		e = m_players.end();
-	for ( ; i!=e; ++i)
-	{
-		ss << i->second.ToString() << " " << i->second.ping <<  "ms\n";
-		pid_list.push_back(i->second.pid);
-	}
-
-	list = ss.str();
 }
 
 // called from ---GUI--- thread / and ---NETPLAY--- thread
@@ -561,28 +505,16 @@ bool NetPlayServer::ChangeGame(const std::string &game)
 	return true;
 }
 
-// called from ---CPU--- thread
-void NetPlayServer::SendPadState(const PadMapping local_nb, const NetPad& np)
+// called from ---GUI--- thread
+void NetPlayServer::SetNetSettings(const NetSettings &settings)
 {
-	// send to server
-	sf::Packet spac;
-	spac << (MessageId)NP_MSG_PAD_DATA;
-	spac << m_local_player->pad_map[local_nb];	// in-game pad num
-	spac << np.nHi << np.nLo;
-
-	std::lock_guard<std::recursive_mutex> lks(m_crit.send);
-	SendToClients(spac);
+	m_settings = settings;
 }
 
 // called from ---GUI--- thread
 bool NetPlayServer::StartGame(const std::string &path)
 {
 	std::lock_guard<std::recursive_mutex> lkg(m_crit.game);
-
-	if (false == NetPlay::StartGame(path))
-		return false;
-
-	// TODO: i dont like this here
 	m_current_game = Common::Timer::GetTimeMs();
 
 	// no change, just update with clients
@@ -592,10 +524,18 @@ bool NetPlayServer::StartGame(const std::string &path)
 	sf::Packet spac;
 	spac << (MessageId)NP_MSG_START_GAME;
 	spac << m_current_game;
+	spac << m_settings.m_CPUthread;
+	spac << m_settings.m_DSPEnableJIT;
+	spac << m_settings.m_DSPHLE;
+	spac << m_settings.m_WriteToMemcard;
+	for (unsigned int i = 0; i < 4; ++i)
+		spac << m_settings.m_Controllers[i];
 
 	std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
 	std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 	SendToClients(spac);
+
+	m_is_running = true;
 
 	return true;
 }
@@ -604,9 +544,6 @@ bool NetPlayServer::StartGame(const std::string &path)
 // called from ---GUI--- thread
 bool NetPlayServer::StopGame()
 {
-	if (false == NetPlay::StopGame())
-		return false;
-
 	// tell clients to stop game
 	sf::Packet spac;
 	spac << (MessageId)NP_MSG_STOP_GAME;
@@ -614,6 +551,8 @@ bool NetPlayServer::StopGame()
 	std::lock_guard<std::recursive_mutex> lkp(m_crit.players);
 	std::lock_guard<std::recursive_mutex> lks(m_crit.send);
 	SendToClients(spac);
+
+	m_is_running = false;
 
 	return true;
 }
@@ -628,3 +567,160 @@ void NetPlayServer::SendToClients(sf::Packet& packet, const PlayerId skip_pid)
 		if (i->second.pid && (i->second.pid != skip_pid))
 			i->second.socket.Send(packet);
 }
+
+#ifdef USE_UPNP
+#include <miniwget.h>
+#include <miniupnpc.h>
+#include <upnpcommands.h>
+
+struct UPNPUrls NetPlayServer::m_upnp_urls;
+struct IGDdatas NetPlayServer::m_upnp_data;
+u16 NetPlayServer::m_upnp_mapped = 0;
+bool NetPlayServer::m_upnp_inited = false;
+bool NetPlayServer::m_upnp_error = false;
+std::thread NetPlayServer::m_upnp_thread;
+
+// called from ---GUI--- thread
+void NetPlayServer::TryPortmapping(u16 port)
+{
+	if (m_upnp_thread.joinable())
+		m_upnp_thread.join();
+	m_upnp_thread = std::thread(&NetPlayServer::mapPortThread, port);
+}
+
+// UPnP thread: try to map a port
+void NetPlayServer::mapPortThread(const u16 port)
+{
+	std::string ourIP = sf::IPAddress::GetLocalAddress().ToString();
+
+	if (!m_upnp_inited)
+		if (!initUPnP())
+			goto fail;
+
+	if (!UPnPMapPort(ourIP, port))
+		goto fail;
+
+	NOTICE_LOG(NETPLAY, "Successfully mapped port %d to %s.", port, ourIP.c_str());
+	return;
+fail:
+	WARN_LOG(NETPLAY, "Failed to map port %d to %s.", port, ourIP.c_str());
+	return;
+}
+
+// UPnP thread: try to unmap a port
+void NetPlayServer::unmapPortThread()
+{
+	if (m_upnp_mapped > 0)
+		UPnPUnmapPort(m_upnp_mapped);
+}
+
+// called from ---UPnP--- thread
+// discovers the IGD
+bool NetPlayServer::initUPnP()
+{
+	UPNPDev *devlist, *dev;
+	std::vector<UPNPDev *> igds;
+	int descXMLsize = 0, upnperror = 0;
+	char *descXML;
+
+	// Don't init if already inited
+	if (m_upnp_inited)
+		return true;
+
+	// Don't init if it failed before
+	if (m_upnp_error)
+		return false;
+
+	memset(&m_upnp_urls, 0, sizeof(UPNPUrls));
+	memset(&m_upnp_data, 0, sizeof(IGDdatas));
+
+	// Find all UPnP devices
+	devlist = upnpDiscover(2000, NULL, NULL, 0, 0, &upnperror);
+	if (!devlist)
+	{
+		WARN_LOG(NETPLAY, "An error occured trying to discover UPnP devices.");
+
+		m_upnp_error = true;
+		m_upnp_inited = false;
+
+		return false;
+	}
+
+	// Look for the IGD
+	dev = devlist;
+	while (dev)
+	{
+		if (strstr(dev->st, "InternetGatewayDevice"))
+			igds.push_back(dev);
+		dev = dev->pNext;
+	}
+
+	std::vector<UPNPDev *>::iterator i;
+	for (i = igds.begin(); i != igds.end(); i++)
+	{
+		dev = *i;
+		descXML = (char *) miniwget(dev->descURL, &descXMLsize, 0);
+		if (descXML)
+		{
+			parserootdesc(descXML, descXMLsize, &m_upnp_data);
+			free(descXML);
+			descXML = 0;
+			GetUPNPUrls(&m_upnp_urls, &m_upnp_data, dev->descURL, 0);
+
+			NOTICE_LOG(NETPLAY, "Got info from IGD at %s.", dev->descURL);
+			break;
+		}
+		else
+		{
+			WARN_LOG(NETPLAY, "Error getting info from IGD at %s.", dev->descURL);
+		}
+	}
+
+	freeUPNPDevlist(devlist);
+
+	return true;
+}
+
+// called from ---UPnP--- thread
+// Attempt to portforward!
+bool NetPlayServer::UPnPMapPort(const std::string& addr, const u16 port)
+{
+	char port_str[6] = { 0 };
+	int result;
+
+	if (m_upnp_mapped > 0)
+		UPnPUnmapPort(m_upnp_mapped);
+
+	sprintf(port_str, "%d", port);
+	result = UPNP_AddPortMapping(m_upnp_urls.controlURL, m_upnp_data.first.servicetype,
+	                             port_str, port_str, addr.c_str(),
+	                             (std::string("dolphin-emu TCP on ") + addr).c_str(),
+	                             "TCP", NULL, NULL);
+
+	if(result != 0)
+		return false;
+
+	m_upnp_mapped = port;
+
+	return true;
+}
+
+// called from ---UPnP--- thread
+// Attempt to stop portforwarding.
+// --
+// NOTE: It is important that this happens! A few very crappy routers
+// apparently do not delete UPnP mappings on their own, so if you leave them
+// hanging, the NVRAM will fill with portmappings, and eventually all UPnP
+// requests will fail silently, with the only recourse being a factory reset.
+// --
+bool NetPlayServer::UPnPUnmapPort(const u16 port)
+{
+	char port_str[6] = { 0 };
+
+	sprintf(port_str, "%d", port);
+	UPNP_DeletePortMapping(m_upnp_urls.controlURL, m_upnp_data.first.servicetype,
+	                       port_str, "TCP", NULL);
+
+	return true;
+}
+#endif

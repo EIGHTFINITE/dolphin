@@ -7,10 +7,20 @@ set(LIBS	core
 			audiocommon
 			z
 			sfml-network
-			${GTK2_LIBRARIES}
-			${XRANDR_LIBRARIES}
-			${X11_LIBRARIES})
+			${GTK2_LIBRARIES})
 if(NOT ANDROID)
+	if(USE_X11)
+	  set(LIBS  ${LIBS} ${X11_LIBRARIES}
+              ${XINPUT2_LIBRARIES}
+	      ${XRANDR_LIBRARIES})
+	endif()
+	if(USE_WAYLAND)
+	  set(LIBS  ${LIBS} ${WAYLAND_LIBRARIES}
+		${XKBCOMMON_LIBRARIES})
+	endif()
+
+	link_directories(${CMAKE_PREFIX_PATH}/lib)
+
 	if(SDL2_FOUND)
 		# Using shared SDL2
 		set(LIBS	${LIBS} ${SDL2_LIBRARY})
@@ -23,6 +33,8 @@ if(NOT ANDROID)
 			set(LIBS	${LIBS} SDL)
 		endif()
 	endif()
+else()
+	set(LIBS ${LIBS} png)
 endif()
 
 if(LIBAV_FOUND)
@@ -80,20 +92,26 @@ if(wxWidgets_FOUND)
 	set(WXLIBS ${wxWidgets_LIBRARIES})
 else()
 	if(ANDROID)
-		set(SRCS Src/MainAndroid.cpp)
+		set(SRCS Src/Android/TextureLoader.cpp
+			 Src/Android/ButtonManager.cpp
+			 Src/MainAndroid.cpp)
 	else()
 		set(SRCS Src/MainNoGUI.cpp)
 	endif()
 endif()
 
 if(USE_EGL)
-	if(NOT ANDROID)
-		set(SRCS ${SRCS} Src/GLInterface/EGL_X11.cpp
-			Src/GLInterface/X11_Util.cpp)
+	set(SRCS ${SRCS} Src/GLInterface/Platform.cpp
+		Src/GLInterface/EGL.cpp)	
+	if(USE_WAYLAND)
+		set(SRCS ${SRCS} Src/GLInterface/Wayland_Util.cpp)
+	endif()
+	if(USE_X11)
+		set(SRCS ${SRCS} Src/GLInterface/X11_Util.cpp)
 	endif()
 else()
 	if(WIN32)
-		set(SRCS ${SRCS} Src/GLInterface/GLW.cpp)
+		set(SRCS ${SRCS} Src/GLInterface/WGL.cpp)
 	elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 		set(SRCS ${SRCS} Src/GLInterface/AGL.cpp)
 	else()
@@ -127,10 +145,8 @@ elseif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 	list(APPEND SRCS ${RESOURCES})
 	set_source_files_properties(${RESOURCES} PROPERTIES
 		MACOSX_PACKAGE_LOCATION Resources)
-else()
-	if(NOT ANDROID)
-		set(SRCS ${SRCS} Src/X11Utils.cpp)
-	endif()
+elseif(USE_X11)
+	set(SRCS ${SRCS} Src/X11Utils.cpp)
 endif()
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD" OR
@@ -149,7 +165,12 @@ else()
 	set(DOLPHIN_EXE ${DOLPHIN_EXE_BASE}-nogui)
 endif()
 
+if(USE_UPNP)
+  set(LIBS  ${LIBS} miniupnpc)
+endif()
+
 if(ANDROID)
+	set(DOLPHIN_EXE main)
 	add_library(${DOLPHIN_EXE} SHARED ${SRCS})
 	target_link_libraries(${DOLPHIN_EXE} 
 	log
@@ -157,6 +178,30 @@ if(ANDROID)
 	"-Wl,--whole-archive"
 	${LIBS}
 	"-Wl,--no-whole-archive"
+	)
+	if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "mips")
+		set (SO_TARGET "mips")
+	endif()
+	if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "armv7-a")
+		set (SO_TARGET "armeabi-v7a")
+	endif()
+	if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "armv5te")
+		set (SO_TARGET "armeabi")
+	endif()
+	if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "i686")
+		set (SO_TARGET "x86")
+	endif()
+	add_custom_command(TARGET ${DOLPHIN_EXE} POST_BUILD
+		COMMAND mkdir ARGS -p ${CMAKE_SOURCE_DIR}/Source/Android/libs/${SO_TARGET}
+	)
+	add_custom_command(TARGET ${DOLPHIN_EXE} POST_BUILD
+		COMMAND cp ARGS ${CMAKE_SOURCE_DIR}/libs/${SO_TARGET}/lib${DOLPHIN_EXE}.so ${CMAKE_SOURCE_DIR}/Source/Android/libs/${SO_TARGET}/
+	)
+	add_custom_command(TARGET ${DOLPHIN_EXE} POST_BUILD
+		COMMAND cp ARGS ${CMAKE_SOURCE_DIR}/Data/Sys/GC/* ${CMAKE_SOURCE_DIR}/Source/Android/assets/
+	)
+	add_custom_command(TARGET ${DOLPHIN_EXE} POST_BUILD
+		COMMAND cp ARGS ${CMAKE_SOURCE_DIR}/Data/Sys/Wii/* ${CMAKE_SOURCE_DIR}/Source/Android/assets/
 	)
 else()
 	add_executable(${DOLPHIN_EXE} ${SRCS})
@@ -169,14 +214,6 @@ else()
 		set_target_properties(${DOLPHIN_EXE} PROPERTIES
 			MACOSX_BUNDLE true
 			MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in
-			)
-
-		# Install Cg framework into application bundle.
-		copy_resolved_framework_into_bundle(
-			# Our framework in "Externals" does not have "Versions/Current/" in
-			# its path; work around the missing directory levels using "././".
-			"${CMAKE_SOURCE_DIR}/Externals/Cg/Cg.framework/././Cg"
-			"${BUNDLE_PATH}/Contents/Frameworks/Cg.framework/././Cg"
 			)
 
 		# Fix up the bundle after it is finished.

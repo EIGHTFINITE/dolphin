@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "Globals.h"
 #include "CheatsWindow.h"
@@ -27,6 +14,7 @@
 #include "WxUtils.h"
 
 #define MAX_CHEAT_SEARCH_RESULTS_DISPLAY	256
+const wxString title = _("Cheats Manager");
 
 extern std::vector<ActionReplay::ARCode> arCodes;
 extern CFrame* main_frame;
@@ -35,26 +23,15 @@ extern CFrame* main_frame;
 static wxCheatsWindow *g_cheat_window;
 
 wxCheatsWindow::wxCheatsWindow(wxWindow* const parent)
-	: wxDialog(parent, wxID_ANY, _("Cheats Manager"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER|wxMAXIMIZE_BOX|wxMINIMIZE_BOX|wxDIALOG_NO_PARENT)
+	: wxDialog(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER|wxMAXIMIZE_BOX|wxMINIMIZE_BOX|wxDIALOG_NO_PARENT)
 {
 	::g_cheat_window = this;
 
 	// Create the GUI controls
 	Init_ChildControls();
 
-	// Load Data
-	Load_ARCodes();
-
-	// Load Gecko Codes :/
-	{
-	const DiscIO::IVolume* const vol = VolumeHandler::GetVolume();
-	if (vol)
-	{
-		m_gameini_path = File::GetUserPath(D_GAMECONFIG_IDX) + vol->GetUniqueID() + ".ini";
-		m_gameini.Load(m_gameini_path);
-		m_geckocode_panel->LoadCodes(m_gameini);
-	}
-	}
+	// load codes
+	UpdateGUI();
 
 	SetSize(wxSize(-1, 600));
 	Center();
@@ -132,7 +109,7 @@ void wxCheatsWindow::Init_ChildControls()
 	m_Notebook_Main->AddPage(m_Tab_Log, _("Logging"));
 
 	// Button Strip
-	wxButton* const button_apply = new wxButton(panel, wxID_APPLY, _("Apply"), wxDefaultPosition, wxDefaultSize);
+	button_apply = new wxButton(panel, wxID_APPLY, _("Apply"), wxDefaultPosition, wxDefaultSize);
 	button_apply->Bind(wxEVT_COMMAND_BUTTON_CLICKED, &wxCheatsWindow::OnEvent_ApplyChanges_Press, this);
 	wxButton* const button_cancel = new wxButton(panel, wxID_CANCEL, _("Cancel"), wxDefaultPosition, wxDefaultSize);
 	button_cancel->Bind(wxEVT_COMMAND_BUTTON_CLICKED, &wxCheatsWindow::OnEvent_ButtonClose_Press, this);
@@ -262,11 +239,33 @@ void wxCheatsWindow::OnEvent_Close(wxCloseEvent& ev)
 	Destroy();
 }
 
+// load codes for a new ISO ID
+void wxCheatsWindow::UpdateGUI()
+{
+	// load code
+	m_gameini_path = File::GetUserPath(D_GAMECONFIG_IDX) + Core::g_CoreStartupParameter.GetUniqueID() + ".ini";
+	m_gameini.Load(m_gameini_path);
+	Load_ARCodes();
+	Load_GeckoCodes();
+
+	// enable controls
+	button_apply->Enable(Core::IsRunning());
+
+	// write the ISO name in the title
+	if (Core::IsRunning())
+		SetTitle(title + ": " + Core::g_CoreStartupParameter.GetUniqueID() + " - " + Core::g_CoreStartupParameter.m_strName);
+	else
+		SetTitle(title);
+}
+
 void wxCheatsWindow::Load_ARCodes()
 {
 	using namespace ActionReplay;
 
 	m_CheckListBox_CheatsList->Clear();
+
+	if (!Core::IsRunning())
+		return;
 
 	indexList.clear();
 	size_t size = GetCodeListSize();
@@ -280,6 +279,11 @@ void wxCheatsWindow::Load_ARCodes()
 		ind.uiIndex = index;
 		indexList.push_back(ind);
 	}
+}
+
+void wxCheatsWindow::Load_GeckoCodes()
+{
+	m_geckocode_panel->LoadCodes(m_gameini, Core::g_CoreStartupParameter.GetUniqueID(), true);
 }
 
 void wxCheatsWindow::OnEvent_CheatsList_ItemSelected(wxCommandEvent& WXUNUSED (event))
@@ -298,10 +302,11 @@ void wxCheatsWindow::OnEvent_CheatsList_ItemSelected(wxCommandEvent& WXUNUSED (e
 			sprintf(numcodes, "Number of Codes: %lu", (unsigned long)code.ops.size());
 			m_Label_NumCodes->SetLabel(StrToWxStr(numcodes));
 			m_ListBox_CodesList->Clear();
+
 			for (size_t j = 0; j < code.ops.size(); j++)
 			{
 				char text2[CHAR_MAX];
-			    char* ops = text2;
+				char* ops = text2;
 				sprintf(ops, "%08x %08x", code.ops[j].cmd_addr, code.ops[j].value);
 				m_ListBox_CodesList->Append(StrToWxStr(ops));
 			}
@@ -323,7 +328,7 @@ void wxCheatsWindow::OnEvent_CheatsList_ItemToggled(wxCommandEvent& WXUNUSED (ev
 
 void wxCheatsWindow::OnEvent_ApplyChanges_Press(wxCommandEvent& ev)
 {
-	// Appply AR Code changes
+	// Apply AR Code changes
 	for (size_t i = 0; i < indexList.size(); i++)
 	{
 		ActionReplay::SetARCode_IsActive(m_CheckListBox_CheatsList->IsChecked(indexList[i].uiIndex), indexList[i].index);
@@ -332,7 +337,7 @@ void wxCheatsWindow::OnEvent_ApplyChanges_Press(wxCommandEvent& ev)
 	// Apply Gecko Code changes
 	Gecko::SetActiveCodes(m_geckocode_panel->GetCodes());
 
-	// save gameini, with changed gecko codes
+	// Save gameini, with changed gecko codes
 	if (m_gameini_path.size())
 	{
 		Gecko::SaveCodes(m_gameini, m_geckocode_panel->GetCodes());
@@ -409,7 +414,7 @@ void CheatSearchTab::FilterCheatSearchResults(wxCommandEvent&)
 	filtered_results.reserve(search_results.size());
 
 
-	// determine the selected filter
+	// Determine the selected filter
 	// 1 : equal
 	// 2 : greater-than
 	// 4 : less-than

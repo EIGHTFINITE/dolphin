@@ -83,14 +83,82 @@ bool TryMakeOperand2_AllowNegation(s32 imm, Operand2 &op2, bool *negated)
 	}
 }
 
-void ARMXEmitter::MOVI2F(ARMReg dest, float val, ARMReg tempReg)
+Operand2 AssumeMakeOperand2(u32 imm) {
+	Operand2 op2;
+	bool result = TryMakeOperand2(imm, op2);
+	_dbg_assert_msg_(DYNA_REC, result, "Could not make assumed Operand2.");
+	return op2;
+}
+
+bool ARMXEmitter::TrySetValue_TwoOp(ARMReg reg, u32 val)
+{
+	int ops = 0;
+	for (int i = 0; i < 16; i++)
+	{
+		if ((val >> (i*2)) & 0x3)
+		{
+			ops++;
+			i+=3;
+		}
+	}
+	if (ops > 2)
+		return false;
+	
+	bool first = true;
+	for (int i = 0; i < 16; i++, val >>=2) {
+		if (val & 0x3) {
+			first ? MOV(reg, Operand2((u8)val, (u8)((16-i) & 0xF)))
+				  : ORR(reg, reg, Operand2((u8)val, (u8)((16-i) & 0xF)));
+			first = false;
+			i+=3;
+			val >>= 6;
+		}
+	}
+	return true;
+}
+
+void ARMXEmitter::MOVI2F(ARMReg dest, float val, ARMReg tempReg, bool negate)
 {
 	union {float f; u32 u;} conv;
-	conv.f = val;
+	conv.f = negate ? -val : val;
+	// Try moving directly first if mantisse is empty
+	if (cpu_info.bVFPv3 && ((conv.u & 0x7FFFF) == 0))
+	{
+		// VFP Encoding for Imms: <7> Not(<6>) Repeat(<6>,5) <5:0> Zeros(19)
+		bool bit6 = (conv.u & 0x40000000) == 0x40000000;
+		bool canEncode = true;
+		for (u32 mask = 0x20000000; mask >= 0x2000000; mask >>= 1)
+		{
+			if (((conv.u & mask) == mask) == bit6)
+				canEncode = false;
+		}
+		if (canEncode)
+		{
+			u32 imm8 = (conv.u & 0x80000000) >> 24; // sign bit
+			imm8 |= (!bit6 << 6);
+			imm8 |= (conv.u & 0x1F80000) >> 19;
+			VMOV(dest, IMM(imm8));
+			return;
+		}
+	}
 	MOVI2R(tempReg, conv.u);
 	VMOV(dest, tempReg);
-	// TODO: VMOV an IMM directly if possible
-	// Otherwise, use a literal pool and VLDR directly (+- 1020)
+	// Otherwise, possible to use a literal pool and VLDR directly (+- 1020)
+}
+
+void ARMXEmitter::ADDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch)
+{
+	Operand2 op2;
+	bool negated;
+	if (TryMakeOperand2_AllowNegation(val, op2, &negated)) {
+		if (!negated)
+			ADD(rd, rs, op2);
+		else
+			SUB(rd, rs, op2);
+	} else {
+		MOVI2R(scratch, val);
+		ADD(rd, rs, scratch);
+	}
 }
 
 void ARMXEmitter::ANDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch)
@@ -106,6 +174,21 @@ void ARMXEmitter::ANDI2R(ARMReg rd, ARMReg rs, u32 val, ARMReg scratch)
 	} else {
 		MOVI2R(scratch, val);
 		AND(rd, rs, scratch);
+	}
+}
+
+void ARMXEmitter::CMPI2R(ARMReg rs, u32 val, ARMReg scratch)
+{
+	Operand2 op2;
+	bool negated;
+	if (TryMakeOperand2_AllowNegation(val, op2, &negated)) {
+		if (!negated)
+			CMP(rs, op2);
+		else
+			CMN(rs, op2);
+	} else {
+		MOVI2R(scratch, val);
+		CMP(rs, scratch);
 	}
 }
 
@@ -157,7 +240,7 @@ void ARMXEmitter::MOVI2R(ARMReg reg, u32 val, bool optimize)
 {
 	Operand2 op2;
 	bool inverse;
-	
+
 	if (cpu_info.bArmV7 && !optimize)
 	{
 		// For backpatching on ARMv7
@@ -173,7 +256,7 @@ void ARMXEmitter::MOVI2R(ARMReg reg, u32 val, bool optimize)
 			MOVW(reg, val & 0xFFFF);
 			if(val & 0xFFFF0000)
 				MOVT(reg, val, true);
-		} else {
+		} else if (!TrySetValue_TwoOp(reg,val)) {
 			// Use literal pool for ARMv6.
 			AddNewLit(val);
 			LDR(reg, _PC); // To be backpatched later
@@ -182,17 +265,19 @@ void ARMXEmitter::MOVI2R(ARMReg reg, u32 val, bool optimize)
 }
 
 void ARMXEmitter::QuickCallFunction(ARMReg reg, void *func) {
-	MOVI2R(reg, (u32)(func));
-	BL(reg);
+	if (BLInRange(func)) {
+		BL(func);
+	} else {
+		MOVI2R(reg, (u32)(func));
+		BL(reg);
+	}
 }
 
 void ARMXEmitter::SetCodePtr(u8 *ptr)
 {
 	code = ptr;
 	startcode = code;
-#ifdef IOS
 	lastCacheFlushEnd = ptr;
-#endif
 }
 
 const u8 *ARMXEmitter::GetCodePtr() const
@@ -236,13 +321,14 @@ void ARMXEmitter::FlushIcacheSection(u8 *start, u8 *end)
 #elif defined(BLACKBERRY)
 	msync(start, end - start, MS_SYNC | MS_INVALIDATE_ICACHE);
 #elif defined(IOS)
-	if (start != NULL)
-		sys_cache_control(kCacheFunctionPrepareForExecution, start, end - start);
+	// Header file says this is equivalent to: sys_icache_invalidate(start, end - start);
+	sys_cache_control(kCacheFunctionPrepareForExecution, start, end - start);
 #elif !defined(_WIN32)
-#ifndef ANDROID
-	start = startcode; // Should be Linux Only
-#endif
+#ifdef __clang__
+	__clear_cache(start, end);
+#else
 	__builtin___clear_cache(start, end);
+#endif
 #endif
 }
 
@@ -306,7 +392,7 @@ FixupBranch ARMXEmitter::B_CC(CCFlags Cond)
 void ARMXEmitter::B_CC(CCFlags Cond, const void *fnptr)
 {
 	s32 distance = (s32)fnptr - (s32(code) + 8);
-        _assert_msg_(DYNA_REC, distance > -33554432
+        _dbg_assert_msg_(DYNA_REC, distance > -33554432
                      && distance <=  33554432,
                      "B_CC out of range (%p calls %p)", code, fnptr);
 
@@ -325,7 +411,7 @@ FixupBranch ARMXEmitter::BL_CC(CCFlags Cond)
 void ARMXEmitter::SetJumpTarget(FixupBranch const &branch)
 {
 	s32 distance =  (s32(code) - 8)  - (s32)branch.ptr;
-     _assert_msg_(DYNA_REC, distance > -33554432
+     _dbg_assert_msg_(DYNA_REC, distance > -33554432
                      && distance <=  33554432,
                      "SetJumpTarget out of range (%p calls %p)", code,
 					 branch.ptr);
@@ -339,7 +425,7 @@ void ARMXEmitter::SetJumpTarget(FixupBranch const &branch)
 void ARMXEmitter::B (const void *fnptr)
 {
 	s32 distance = (s32)fnptr - (s32(code) + 8);
-        _assert_msg_(DYNA_REC, distance > -33554432
+        _dbg_assert_msg_(DYNA_REC, distance > -33554432
                      && distance <=  33554432,
                      "B out of range (%p calls %p)", code, fnptr);
 
@@ -351,10 +437,18 @@ void ARMXEmitter::B(ARMReg src)
 	Write32(condition | 0x12FFF10 | src);
 }
 
+bool ARMXEmitter::BLInRange(const void *fnptr) {
+	s32 distance = (s32)fnptr - (s32(code) + 8);
+	if (distance <= -33554432 || distance > 33554432)
+		return false;
+	else
+		return true;
+}
+
 void ARMXEmitter::BL(const void *fnptr)
 {
 	s32 distance = (s32)fnptr - (s32(code) + 8);
-        _assert_msg_(DYNA_REC, distance > -33554432
+        _dbg_assert_msg_(DYNA_REC, distance > -33554432
                      && distance <=  33554432,
                      "BL out of range (%p calls %p)", code, fnptr);
 	Write32(condition | 0x0B000000 | ((distance >> 2) & 0x00FFFFFF));
@@ -492,7 +586,7 @@ void ARMXEmitter::WriteInstruction (u32 Op, ARMReg Rd, ARMReg Rn, Operand2 Rm, b
 		}
 	}
 	if (op == -1)
-		_assert_msg_(DYNA_REC, false, "%s not yet support %d", InstNames[Op], Rm.GetType()); 
+		_dbg_assert_msg_(DYNA_REC, false, "%s not yet support %d", InstNames[Op], Rm.GetType()); 
 	Write32(condition | (op << 21) | (SetFlags ? (1 << 20) : 0) | Rn << 16 | Rd << 12 | Data);
 }
 
@@ -518,6 +612,8 @@ void ARMXEmitter::LSLS(ARMReg dest, ARMReg src, Operand2 op2) { WriteShiftedData
 void ARMXEmitter::LSL (ARMReg dest, ARMReg src, ARMReg op2)	  { WriteShiftedDataOp(1, false, dest, src, op2);} 
 void ARMXEmitter::LSLS(ARMReg dest, ARMReg src, ARMReg op2)	  { WriteShiftedDataOp(1, true, dest, src, op2);}
 void ARMXEmitter::LSR (ARMReg dest, ARMReg src, Operand2 op2) { WriteShiftedDataOp(3, false, dest, src, op2);}
+void ARMXEmitter::ASR (ARMReg dest, ARMReg src, Operand2 op2) { WriteShiftedDataOp(4, false, dest, src, op2);}
+void ARMXEmitter::ASRS(ARMReg dest, ARMReg src, Operand2 op2) { WriteShiftedDataOp(4, true, dest, src, op2);}
 void ARMXEmitter::MUL (ARMReg dest,	ARMReg src, ARMReg op2)
 {
 	Write32(condition | (dest << 16) | (src << 8) | (9 << 4) | op2);
@@ -534,6 +630,11 @@ void ARMXEmitter::Write4OpMultiply(u32 op, ARMReg destLo, ARMReg destHi, ARMReg 
 void ARMXEmitter::UMULL(ARMReg destLo, ARMReg destHi, ARMReg rm, ARMReg rn)
 {
 	Write4OpMultiply(0x8, destLo, destHi, rn, rm);
+}
+
+void ARMXEmitter::UMULLS(ARMReg destLo, ARMReg destHi, ARMReg rm, ARMReg rn)
+{
+	Write4OpMultiply(0x9, destLo, destHi, rn, rm);
 }
 
 void ARMXEmitter::SMULL(ARMReg destLo, ARMReg destHi, ARMReg rm, ARMReg rn)
@@ -589,11 +690,11 @@ void ARMXEmitter::RBIT(ARMReg dest, ARMReg src)
 }
 void ARMXEmitter::REV (ARMReg dest, ARMReg src) 
 {
-	Write32(condition | (0x6B << 20) | (0xF << 16) | (dest << 12) | (0xF3 << 4) | src);
+	Write32(condition | (0x6BF << 16) | (dest << 12) | (0xF3 << 4) | src);
 }
 void ARMXEmitter::REV16(ARMReg dest, ARMReg src)
 {
-	Write32(condition | (0x3DF << 16) | (dest << 12) | (0xFD << 4) | src);
+	Write32(condition | (0x6BF << 16) | (dest << 12) | (0xFB << 4) | src);
 }
 
 void ARMXEmitter::_MSR (bool write_nzcvq, bool write_g,		Operand2 op2)
@@ -614,7 +715,7 @@ void ARMXEmitter::LDREX(ARMReg dest, ARMReg base)
 }
 void ARMXEmitter::STREX(ARMReg result, ARMReg base, ARMReg op)
 {
-	_assert_msg_(DYNA_REC, (result != base && result != op), "STREX dest can't be other two registers");
+	_dbg_assert_msg_(DYNA_REC, (result != base && result != op), "STREX dest can't be other two registers");
 	Write32(condition | (24 << 20) | (base << 16) | (result << 12) | (0xF9 << 4) | op);
 }
 void ARMXEmitter::DMB ()
@@ -628,44 +729,46 @@ void ARMXEmitter::SVC(Operand2 op)
 
 // IMM, REG, IMMSREG, RSR
 // -1 for invalid if the instruction doesn't support that
-const s32 LoadStoreOps[][4] = { {0x40, 0x60, 0x60, -1}, // STR
-				{0x41, 0x61, 0x61, -1}, // LDR
-				{0x44, 0x64, 0x64, -1}, // STRB
-				{0x45, 0x65, 0x65, -1}, // LDRB
-				// Special encodings
-				{ 0x4,  0x0,  -1, -1}, // STRH
-				{ 0x5,  0x1,  -1, -1}, // LDRH
-				{ 0x5,  0x1,  -1, -1}, // LDRSB
-				{ 0x5,  0x1,  -1, -1}, // LDRSH
-				};
-const char *LoadStoreNames[] = { "STR",
-				 "LDR",
-				 "STRB",
-				 "LDRB",
-				 "STRH",
-				 "LDRH",
-				 "LDRSB",
-				 "LDRSH",
-				};
+const s32 LoadStoreOps[][4] = {
+	{0x40, 0x60, 0x60, -1}, // STR
+	{0x41, 0x61, 0x61, -1}, // LDR
+	{0x44, 0x64, 0x64, -1}, // STRB
+	{0x45, 0x65, 0x65, -1}, // LDRB
+	// Special encodings
+	{ 0x4,  0x0,  -1, -1}, // STRH
+	{ 0x5,  0x1,  -1, -1}, // LDRH
+	{ 0x5,  0x1,  -1, -1}, // LDRSB
+	{ 0x5,  0x1,  -1, -1}, // LDRSH
+};
+const char *LoadStoreNames[] = {
+	"STR",
+	"LDR",
+	"STRB",
+	"LDRB",
+	"STRH",
+	"LDRH",
+	"LDRSB",
+	"LDRSH",
+};
 
 void ARMXEmitter::WriteStoreOp(u32 Op, ARMReg Rt, ARMReg Rn, Operand2 Rm, bool RegAdd)
 {
 	s32 op = LoadStoreOps[Op][Rm.GetType()]; // Type always decided by last operand
 	u32 Data;
-	
+
 	// Qualcomm chipsets get /really/ angry if you don't use index, even if the offset is zero.
 	// Some of these encodings require Index at all times anyway. Doesn't really matter.
 	// bool Index = op2 != 0 ? true : false;
 	bool Index = true;
-	bool Add = false; 	
+	bool Add = false;
 
-	// Special Encoding	
+	// Special Encoding (misc addressing mode)
 	bool SpecialOp = false;
 	bool Half = false;
 	bool SignedLoad = false;
 
 	if (op == -1)
-		_assert_msg_(DYNA_REC, false, "%s does not support %d", LoadStoreNames[Op], Rm.GetType()); 
+		_dbg_assert_msg_(DYNA_REC, false, "%s does not support %d", LoadStoreNames[Op], Rm.GetType()); 
 
 	switch (Op)
 	{
@@ -699,10 +802,13 @@ void ARMXEmitter::WriteStoreOp(u32 Op, ARMReg Rt, ARMReg Rn, Operand2 Rm, bool R
 			// The offset is encoded differently on this one.
 			if (SpecialOp)
 				Data = (Data & 0xF0 << 4) | (Data & 0xF);
-			if (Temp >= 0) Add = true;	
+			if (Temp >= 0) Add = true;
 		}
 		break;
 		case TYPE_REG:
+			Data = Rm.GetData();
+			Add = RegAdd;
+			break;
 		case TYPE_IMMSREG:
 			if (!SpecialOp)
 			{
@@ -710,17 +816,18 @@ void ARMXEmitter::WriteStoreOp(u32 Op, ARMReg Rt, ARMReg Rn, Operand2 Rm, bool R
 				Add = RegAdd;
 				break;
 			}
+			// Intentional fallthrough: TYPE_IMMSREG not supported for misc addressing.
 		default:
 			// RSR not supported for any of these
 			// We already have the warning above
 			BKPT(0x2);
 			return;
-		break;  
+		break;
 	}
 	if (SpecialOp)
 	{
 		// Add SpecialOp things
-		Data = (0x5 << 4) | (SignedLoad << 6) | (Half << 5) | Data;
+		Data = (0x9 << 4) | (SignedLoad << 6) | (Half << 5) | Data;
 	}
 	Write32(condition | (op << 20) | (Index << 24) | (Add << 23) | (Rn << 16) | (Rt << 12) | Data);
 }
@@ -785,10 +892,25 @@ ARMReg ARMXEmitter::SubBase(ARMReg Reg)
 }
 
 // NEON Specific
+void ARMXEmitter::VABD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm)
+{
+	_dbg_assert_msg_(DYNA_REC, Vd >= D0, "Pass invalid register to VABD(float)");
+	_dbg_assert_msg_(DYNA_REC, cpu_info.bNEON, "Can't use VABD(float) when CPU doesn't support it");
+	bool register_quad = Vd >= Q0;
+
+	// Gets encoded as a double register
+	Vd = SubBase(Vd);
+	Vn = SubBase(Vn);
+	Vm = SubBase(Vm);
+
+	Write32((0xF3 << 24) | ((Vd & 0x10) << 18) | (Size << 20) | ((Vn & 0xF) << 16) \
+		| ((Vd & 0xF) << 12) | (0xD << 8) | ((Vn & 0x10) << 3) | (register_quad << 6) \
+		| ((Vm & 0x10) << 2) | (Vm & 0xF));
+}
 void ARMXEmitter::VADD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm)
 {
-	_assert_msg_(DYNA_REC, Vd >= D0, "Pass invalid register to VADD(integer)");
-	_assert_msg_(DYNA_REC, cpu_info.bNEON, "Can't use VADD(integer) when CPU doesn't support it");
+	_dbg_assert_msg_(DYNA_REC, Vd >= D0, "Pass invalid register to VADD(integer)");
+	_dbg_assert_msg_(DYNA_REC, cpu_info.bNEON, "Can't use VADD(integer) when CPU doesn't support it");
 
 	bool register_quad = Vd >= Q0;
 
@@ -799,13 +921,13 @@ void ARMXEmitter::VADD(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm)
 
 	Write32((0xF2 << 24) | ((Vd & 0x10) << 18) | (Size << 20) | ((Vn & 0xF) << 16) \
 		| ((Vd & 0xF) << 12) | (0x8 << 8) | ((Vn & 0x10) << 3) | (register_quad << 6) \
-		| ((Vm & 0x10) << 2) | (Vm & 0xF)); 
+		| ((Vm & 0x10) << 1) | (Vm & 0xF));
 
 }
 void ARMXEmitter::VSUB(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm)
 {
-	_assert_msg_(DYNA_REC, Vd >= Q0, "Pass invalid register to VSUB(integer)");
-	_assert_msg_(DYNA_REC, cpu_info.bNEON, "Can't use VSUB(integer) when CPU doesn't support it");
+	_dbg_assert_msg_(DYNA_REC, Vd >= Q0, "Pass invalid register to VSUB(integer)");
+	_dbg_assert_msg_(DYNA_REC, cpu_info.bNEON, "Can't use VSUB(integer) when CPU doesn't support it");
 
 	// Gets encoded as a double register
 	Vd = SubBase(Vd);
@@ -814,36 +936,37 @@ void ARMXEmitter::VSUB(IntegerSize Size, ARMReg Vd, ARMReg Vn, ARMReg Vm)
 
 	Write32((0xF3 << 24) | ((Vd & 0x10) << 18) | (Size << 20) | ((Vn & 0xF) << 16) \
 		| ((Vd & 0xF) << 12) | (0x8 << 8) | ((Vn & 0x10) << 3) | (1 << 6) \
-		| ((Vm & 0x10) << 2) | (Vm & 0xF)); 
+		| ((Vm & 0x10) << 2) | (Vm & 0xF));
 }
 
-// VFP Specific
-struct VFPEnc
-{
-	u16 opc1;
-	u16 opc2;
-};
 // Double/single, Neon
-const VFPEnc VFPOps[][2] = {
-	{{0xE0, 0xA0}, {0x20, 0xD1}}, // VMLA
-	{{0xE0, 0xA4}, {0x22, 0xD1}}, // VMLS
-	{{0xE3, 0xA0}, {0x20, 0xD0}}, // VADD
-	{{0xE3, 0xA4}, {0x22, 0xD0}}, // VSUB
-	{{0xE2, 0xA0}, {0x30, 0xD1}}, // VMUL
-	{{0xEB, 0xAC}, {0x3B, 0x30}}, // VABS	
-	{{0xE8, 0xA0}, {  -1,   -1}}, // VDIV
-	{{0xEB, 0xA4}, {  -1,   -1}}, // VNEG
-	{{0xEB, 0xAC}, {  -1,   -1}}, // VSQRT
-	{{0xED, 0xA2}, {  -1,   -1}}, // VCMP
-	{{0xED, 0xAA}, {  -1,   -1}}, // VCMPE
-	{{  -1,   -1}, {0x3B, 0x70}}, // VABSi
+extern const VFPEnc VFPOps[16][2] = {
+	{{0xE0, 0xA0}, {0x20, 0xD1}}, // 0: VMLA
+	{{0xE1, 0xA4}, {  -1,   -1}}, // 1: VNMLA
+	{{0xE0, 0xA4}, {0x22, 0xD1}}, // 2: VMLS
+	{{0xE1, 0xA0}, {  -1,   -1}}, // 3: VNMLS
+	{{0xE3, 0xA0}, {0x20, 0xD0}}, // 4: VADD
+	{{0xE3, 0xA4}, {0x22, 0xD0}}, // 5: VSUB
+	{{0xE2, 0xA0}, {0x30, 0xD1}}, // 6: VMUL
+	{{0xE2, 0xA4}, {  -1,   -1}}, // 7: VNMUL
+	{{0xEB, 0xAC}, {  -1 /* 0x3B */,  -1 /* 0x70 */}}, // 8: VABS(Vn(0x0) used for encoding)
+	{{0xE8, 0xA0}, {  -1,   -1}}, // 9: VDIV
+	{{0xEB, 0xA4}, {  -1 /* 0x3B */,   -1 /* 0x78 */}}, // 10: VNEG(Vn(0x1) used for encoding)
+	{{0xEB, 0xAC}, {  -1,   -1}}, // 11: VSQRT (Vn(0x1) used for encoding)
+	{{0xEB, 0xA4}, {  -1,   -1}}, // 12: VCMP (Vn(0x4 | #0 ? 1 : 0) used for encoding)
+	{{0xEB, 0xAC}, {  -1,   -1}}, // 13: VCMPE (Vn(0x4 | #0 ? 1 : 0) used for encoding)
+	{{  -1,   -1}, {0x3B, 0x30}}, // 14: VABSi
 	};
-const char *VFPOps[] = {
+
+extern const char *VFPOpNames[16] = {
 	"VMLA",
+	"VNMLA",
 	"VMLS",
+	"VNMLS",
 	"VADD",
 	"VSUB",
 	"VMUL",
+	"VNMUL",
 	"VABS",
 	"VDIV",
 	"VNEG",
@@ -861,10 +984,10 @@ u32 ARMXEmitter::EncodeVd(ARMReg Vd)
 	ARMReg Reg = SubBase(Vd);
 
 	if (quad_reg)
-		((Reg & 0x10) << 18) | ((Reg & 0xF) << 12);
+		return ((Reg & 0x10) << 18) | ((Reg & 0xF) << 12);
 	else
 		if (double_reg)
-			return ((Reg & 0x10) << 18) | ((Reg & 0xF) << 16);
+			return ((Reg & 0x10) << 18) | ((Reg & 0xF) << 12);
 		else
 			return ((Reg & 0x1) << 22) | ((Reg & 0x1E) << 11);
 }
@@ -875,7 +998,7 @@ u32 ARMXEmitter::EncodeVn(ARMReg Vn)
 	
 	ARMReg Reg = SubBase(Vn);
 	if (quad_reg)
-		((Reg & 0xF) << 16) | ((Reg & 0x10) << 3);
+		return ((Reg & 0xF) << 16) | ((Reg & 0x10) << 3);
 	else
 		if (double_reg)
 			return ((Reg & 0xF) << 16) | ((Reg & 0x10) << 3);
@@ -890,40 +1013,57 @@ u32 ARMXEmitter::EncodeVm(ARMReg Vm)
 	ARMReg Reg = SubBase(Vm);
 
 	if (quad_reg)
-		((Reg & 0x10) << 2) | (Reg & 0xF);
+		return ((Reg & 0x10) << 2) | (Reg & 0xF);
 	else
 		if (double_reg)
 			return ((Reg & 0x10) << 2) | (Reg & 0xF);
 		else
 			return ((Reg & 0x1) << 5) | (Reg >> 1);
 }
+
 void ARMXEmitter::WriteVFPDataOp(u32 Op, ARMReg Vd, ARMReg Vn, ARMReg Vm)
 {
 	bool quad_reg = Vd >= Q0;
-	bool double_reg = Vd >= D0;
+	bool double_reg = Vd >= D0 && Vd < Q0;
 
 	VFPEnc enc = VFPOps[Op][quad_reg];
-	if (enc.opc1 == (u16)-1 && enc.opc1 == (u16)-1)
-		_assert_msg_(DYNA_REC, false, "%s does not support %s", VFPOps[Op], quad_reg ? "NEON" : "VFP"); 
+	if (enc.opc1 == -1 && enc.opc2 == -1)
+		_dbg_assert_msg_(DYNA_REC, false, "%s does not support %s", VFPOpNames[Op], quad_reg ? "NEON" : "VFP"); 
 	u32 VdEnc = EncodeVd(Vd);
 	u32 VnEnc = EncodeVn(Vn);
 	u32 VmEnc = EncodeVm(Vm);
 	u32 cond = quad_reg ? (0xF << 28) : condition;
 
-	Write32(cond | enc.opc1 | VnEnc | VdEnc | enc.opc2 | VmEnc);
+	Write32(cond | (enc.opc1 << 20) | VnEnc | VdEnc | (enc.opc2 << 4) | (quad_reg << 6) | (double_reg << 8) | VmEnc);
 }
+void ARMXEmitter::VMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(0, Vd, Vn, Vm); }
+void ARMXEmitter::VNMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(1, Vd, Vn, Vm); }
+void ARMXEmitter::VMLS(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(2, Vd, Vn, Vm); }
+void ARMXEmitter::VNMLS(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(3, Vd, Vn, Vm); }
+void ARMXEmitter::VADD(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(4, Vd, Vn, Vm); }
+void ARMXEmitter::VSUB(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(5, Vd, Vn, Vm); }
+void ARMXEmitter::VMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(6, Vd, Vn, Vm); }
+void ARMXEmitter::VNMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(7, Vd, Vn, Vm); }
+void ARMXEmitter::VABS(ARMReg Vd, ARMReg Vm){ WriteVFPDataOp(8, Vd, D0, Vm); }
+void ARMXEmitter::VDIV(ARMReg Vd, ARMReg Vn, ARMReg Vm){ WriteVFPDataOp(9, Vd, Vn, Vm); }
+void ARMXEmitter::VNEG(ARMReg Vd, ARMReg Vm){ WriteVFPDataOp(10, Vd, D1, Vm); }
+void ARMXEmitter::VSQRT(ARMReg Vd, ARMReg Vm){ WriteVFPDataOp(11, Vd, D1, Vm); }
+void ARMXEmitter::VCMP(ARMReg Vd, ARMReg Vm){ WriteVFPDataOp(12, Vd, D4, Vm); }
+void ARMXEmitter::VCMPE(ARMReg Vd, ARMReg Vm){ WriteVFPDataOp(13, Vd, D4, Vm); }
+void ARMXEmitter::VCMP(ARMReg Vd){ WriteVFPDataOp(12, Vd, D5, D0); }
+void ARMXEmitter::VCMPE(ARMReg Vd){ WriteVFPDataOp(13, Vd, D5, D0); }
 
 void ARMXEmitter::VLDR(ARMReg Dest, ARMReg Base, s16 offset)
 {
-	_assert_msg_(DYNA_REC, Dest >= S0 && Dest <= D31, "Passed Invalid dest register to VLDR"); 
-	_assert_msg_(DYNA_REC, Base <= R15, "Passed invalid Base register to VLDR");
+	_dbg_assert_msg_(DYNA_REC, Dest >= S0 && Dest <= D31, "Passed Invalid dest register to VLDR");
+	_dbg_assert_msg_(DYNA_REC, Base <= R15, "Passed invalid Base register to VLDR");
 
 	bool Add = offset >= 0 ? true : false;
 	u32 imm = abs(offset);
 
-	_assert_msg_(DYNA_REC, (imm & 0xC03) == 0, "VLDR: Offset needs to be word aligned and small enough");
+	_dbg_assert_msg_(DYNA_REC, (imm & 0xC03) == 0, "VLDR: Offset needs to be word aligned and small enough");
 
-	if (imm & 0xC03) 
+	if (imm & 0xC03)
 		ERROR_LOG(DYNA_REC, "VLDR: Bad offset %08x", imm);
 
 	bool single_reg = Dest < D0;
@@ -933,26 +1073,25 @@ void ARMXEmitter::VLDR(ARMReg Dest, ARMReg Base, s16 offset)
 	if (single_reg)
 	{
 		Write32(condition | (0xD << 24) | (Add << 23) | ((Dest & 0x1) << 22) | (1 << 20) | (Base << 16) \
-			| ((Dest & 0x1E) << 11) | (10 << 8) | (imm >> 2));	
-
+			| ((Dest & 0x1E) << 11) | (10 << 8) | (imm >> 2));
 	}
 	else
 	{
 		Write32(condition | (0xD << 24) | (Add << 23) | ((Dest & 0x10) << 18) | (1 << 20) | (Base << 16) \
-			| ((Dest & 0xF) << 12) | (11 << 8) | (imm >> 2));	
+			| ((Dest & 0xF) << 12) | (11 << 8) | (imm >> 2));
 	}
 }
 void ARMXEmitter::VSTR(ARMReg Src, ARMReg Base, s16 offset)
 {
-	_assert_msg_(DYNA_REC, Src >= S0 && Src <= D31, "Passed invalid src register to VSTR");
-	_assert_msg_(DYNA_REC, Base <= R15, "Passed invalid base register to VSTR");
+	_dbg_assert_msg_(DYNA_REC, Src >= S0 && Src <= D31, "Passed invalid src register to VSTR");
+	_dbg_assert_msg_(DYNA_REC, Base <= R15, "Passed invalid base register to VSTR");
 
 	bool Add = offset >= 0 ? true : false;
 	u32 imm = abs(offset);
 
-	_assert_msg_(DYNA_REC, (imm & 0xC03) == 0, "VSTR: Offset needs to be word aligned and small enough");
+	_dbg_assert_msg_(DYNA_REC, (imm & 0xC03) == 0, "VSTR: Offset needs to be word aligned and small enough");
 
-	if (imm & 0xC03) 
+	if (imm & 0xC03)
 		ERROR_LOG(DYNA_REC, "VSTR: Bad offset %08x", imm);
 
 	bool single_reg = Src < D0;
@@ -962,49 +1101,12 @@ void ARMXEmitter::VSTR(ARMReg Src, ARMReg Base, s16 offset)
 	if (single_reg)
 	{
 		Write32(condition | (0xD << 24) | (Add << 23) | ((Src & 0x1) << 22) | (Base << 16) \
-			| ((Src & 0x1E) << 11) | (10 << 8) | (imm >> 2));	
+			| ((Src & 0x1E) << 11) | (10 << 8) | (imm >> 2));
 	}
 	else
 	{
 		Write32(condition | (0xD << 24) | (Add << 23) | ((Src & 0x10) << 18) | (Base << 16) \
-			| ((Src & 0xF) << 12) | (11 << 8) | (imm >> 2));	
-	}
-}
-void ARMXEmitter::VCMP(ARMReg Vd, ARMReg Vm, bool E)
-{
-	_assert_msg_(DYNA_REC, Vd < Q0, "Passed invalid Vd to VCMP");
-	bool single_reg = Vd < D0;
-	
-	Vd = SubBase(Vd);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x1) << 22) | (0x34 << 16) | ((Vd & 0x1E) << 11) \
-			| (E << 7) | (0x29 << 6) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x10) << 18) | (0x34 << 16) | ((Vd & 0xF) << 12) \
-			| (E << 7) | (0x2C << 6) | ((Vm & 0x10) << 1) | (Vm & 0xF));
-	}
-}
-void ARMXEmitter::VCMP(ARMReg Vd, bool E)
-{
-	_assert_msg_(DYNA_REC, Vd < Q0, "Passed invalid Vd to VCMP");
-	bool single_reg = Vd < D0;
-
-	Vd = SubBase(Vd);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x1) << 22) | (0x35 << 16) | ((Vd & 0x1E) << 11) \
-			| (E << 7) | (0x29 << 6));
-	}
-	else
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x10) << 18) | (0x35 << 16) | ((Vd & 0xF) << 12) \
-			| (E << 7) | (0x2C << 6)); 
+			| ((Src & 0xF) << 12) | (11 << 8) | (imm >> 2));
 	}
 }
 
@@ -1018,238 +1120,21 @@ void ARMXEmitter::VMSR(ARMReg Rt) {
 	Write32(condition | (0xEE << 20) | (1 << 16) | (Rt << 12) | 0xA10);
 }
 
-void ARMXEmitter::VDIV(ARMReg Vd, ARMReg Vn, ARMReg Vm)
-{
-	_assert_msg_(DYNA_REC, Vd < Q0, "Pased invalid dest register to VSQRT");
-	_assert_msg_(DYNA_REC, Vn < Q0, "Passed invalid Vn to VSQRT");
-	_assert_msg_(DYNA_REC, Vm < Q0, "Passed invalid Vm to VSQRT");
-	bool single_reg = Vd < D0;
-
-	Vd = SubBase(Vd);
-	Vn = SubBase(Vn);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x1) << 22) | ((Vn & 0x1E) << 15) \
-			| ((Vd & 0x1E) << 11) | (0xA << 8) | ((Vn & 0x1) << 7) | ((Vm & 0x1) << 5) \
-			| (Vm >> 1));
-	}
-	else
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x10) << 18) | ((Vn & 0xF) << 16) \
-			| ((Vd & 0xF) << 12) | (0xB << 8) | ((Vn & 0x10) << 3) | ((Vm & 0x10) << 2) \
-			| (Vm & 0xF));
-	}
-}
-void ARMXEmitter::VSQRT(ARMReg Vd, ARMReg Vm)
-{
-	_assert_msg_(DYNA_REC, Vd < Q0, "Pased invalid dest register to VSQRT");
-	_assert_msg_(DYNA_REC, Vm < Q0, "Passed invalid Vm to VSQRT");
-	bool single_reg = Vd < D0;
-
-	Vd = SubBase(Vd);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x1) << 22) | (0x31 << 16) \
-			| ((Vd & 0x1E) << 11) | (0x2B << 6) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x10) << 18) | (0x31 << 16) \
-			| ((Vd & 0xF) << 12) | (0x2F << 6) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-	}
-}
-
 // VFP and ASIMD
-void ARMXEmitter::VADD(ARMReg Vd, ARMReg Vn, ARMReg Vm)
+void ARMXEmitter::VMOV(ARMReg Dest, Operand2 op2)
 {
-	_assert_msg_(DYNA_REC, Vd >= S0, "Passed invalid dest register to VADD");
-	_assert_msg_(DYNA_REC, Vn >= S0, "Passed invalid Vn to VADD");
-	_assert_msg_(DYNA_REC, Vm >= S0, "Passed invalid Vm to VADD");
-	bool single_reg = Vd < D0;
-	bool double_reg = Vd < Q0;
-
-	Vd = SubBase(Vd);
-	Vn = SubBase(Vn);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1C << 23) | ((Vd & 0x1) << 22) | (0x3 << 20) \
-			| ((Vn & 0x1E) << 15) | ((Vd & 0x1E) << 11) | (0x5 << 9) \
-			| ((Vn & 0x1) << 7) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		if (double_reg)
-		{
-			Write32(condition | (0x1C << 23) | ((Vd & 0x10) << 18) | (0x3 << 20) \
-				| ((Vn & 0xF) << 16) | ((Vd & 0xF) << 12) | (0xB << 8) \
-				| ((Vn & 0x10) << 3) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-		}
-		else
-		{
-			_assert_msg_(DYNA_REC, cpu_info.bNEON, "Trying to use VADD with Quad Reg without support!");
-			Write32((0xF2 << 24) | ((Vd & 0x10) << 18) | ((Vn & 0xF) << 16) \
-				| ((Vd & 0xF) << 12) | (0xD << 8) | ((Vn & 0x10) << 3) \
-				| (1 << 6) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-		}
-	}
+	_dbg_assert_msg_(DYNA_REC, cpu_info.bVFPv3, "VMOV #imm requires VFPv3");
+	Write32(condition | (0xEB << 20) | EncodeVd(Dest) | (0xA << 8) | op2.Imm8VFP());
 }
-void ARMXEmitter::VSUB(ARMReg Vd, ARMReg Vn, ARMReg Vm)
-{
-	_assert_msg_(DYNA_REC, Vd >= S0, "Passed invalid dest register to VSUB");
-	_assert_msg_(DYNA_REC, Vn >= S0, "Passed invalid Vn to VSUB");
-	_assert_msg_(DYNA_REC, Vm >= S0, "Passed invalid Vm to VSUB");
-	bool single_reg = Vd < D0;
-	bool double_reg = Vd < Q0;
-	
-	Vd = SubBase(Vd);
-	Vn = SubBase(Vn);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1C << 23) | ((Vd & 0x1) << 22) | (0x3 << 20) \
-			| ((Vn & 0x1E) << 15) | ((Vd & 0x1E) << 11) | (0x5 << 9) \
-			| ((Vn & 0x1) << 7) | (1 << 6) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		if (double_reg)
-		{
-			Write32(condition | (0x1C << 23) | ((Vd & 0x10) << 18) | (0x3 << 20) \
-				| ((Vn & 0xF) << 16) | ((Vd & 0xF) << 12) | (0xB << 8) \
-				| ((Vn & 0x10) << 3) | (1 << 6) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-		}
-		else
-		{
-			_assert_msg_(DYNA_REC, cpu_info.bNEON, "Trying to use VADD with Quad Reg without support!");
-			Write32((0xF2 << 24) | (1 << 21) | ((Vd & 0x10) << 18) | ((Vn & 0xF) << 16) \
-				| ((Vd & 0xF) << 12) | (0xD << 8) | ((Vn & 0x10) << 3) \
-				| (1 << 6) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-		}
-	}
-}
-// VFP and ASIMD
-void ARMXEmitter::VMUL(ARMReg Vd, ARMReg Vn, ARMReg Vm)
-{
-	_assert_msg_(DYNA_REC, Vd >= S0, "Passed invalid dest register to VADD");
-	_assert_msg_(DYNA_REC, Vn >= S0, "Passed invalid Vn to VADD");
-	_assert_msg_(DYNA_REC, Vm >= S0, "Passed invalid Vm to VADD");
-	bool single_reg = Vd < D0;
-	bool double_reg = Vd < Q0;
-
-	Vd = SubBase(Vd);
-	Vn = SubBase(Vn);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1C << 23) | ((Vd & 0x1) << 22) | (0x2 << 20) \
-			| ((Vn & 0x1E) << 15) | ((Vd & 0x1E) << 11) | (0x5 << 9) \
-			| ((Vn & 0x1) << 7) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		if (double_reg)
-		{
-			Write32(condition | (0x1C << 23) | ((Vd & 0x10) << 18) | (0x2 << 20) \
-				| ((Vn & 0xF) << 16) | ((Vd & 0xF) << 12) | (0xB << 8) \
-				| ((Vn & 0x10) << 3) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-		}
-		else
-		{
-			_assert_msg_(DYNA_REC, cpu_info.bNEON, "Trying to use VMUL with Quad Reg without support!");
-		}
-	}
-}
-
-void ARMXEmitter::VMLA(ARMReg Vd, ARMReg Vn, ARMReg Vm)
-{
-	_assert_msg_(DYNA_REC, Vd >= S0, "Passed invalid dest register to VMLA");
-	_assert_msg_(DYNA_REC, Vn >= S0, "Passed invalid Vn to VMLA");
-	_assert_msg_(DYNA_REC, Vm >= S0, "Passed invalid Vm to VMLA");
-	bool single_reg = Vd < D0;
-	bool double_reg = Vd < Q0;
-
-	Vd = SubBase(Vd);
-	Vn = SubBase(Vn);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1C << 23) | ((Vd & 0x1) << 22) | (0x0 << 20) \
-			| ((Vn & 0x1E) << 15) | ((Vd & 0x1E) << 11) | (0x5 << 9) \
-			| ((Vn & 0x1) << 7) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else 
-	{
-		_assert_msg_(DYNA_REC, false, "VMLA: Please implement!");
-	}
-}
-
-void ARMXEmitter::VABS(ARMReg Vd, ARMReg Vm)
-{
-	_assert_msg_(DYNA_REC, Vd < Q0, "VABS doesn't currently support Quad reg");
-	_assert_msg_(DYNA_REC, Vd >= S0, "VABS doesn't support ARM Regs");
-	bool single_reg = Vd < D0;
-	bool double_reg = Vd < Q0;
-
-	Vd = SubBase(Vd);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0xEB << 20) | ((Vd & 0x1) << 22) | ((Vd & 0x1E) << 11) \
-			| (0xAC << 4) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		if (double_reg)
-		{
-			Write32(condition | (0xEB << 20) | ((Vd & 0x10) << 18) | ((Vd & 0xF) << 12) \
-				| (0xBC << 4) | ((Vm & 0x10) << 1) | (Vm & 0xF));
-		}
-		else
-		{
-			_assert_msg_(DYNA_REC, cpu_info.bNEON, "Trying to use VADD with Quad Reg without support!");
-			// XXX: TODO
-		}
-	}	
-}
-
-void ARMXEmitter::VNEG(ARMReg Vd, ARMReg Vm)
-{
-	bool single_reg = Vd < D0;
-
-	Vd = SubBase(Vd);
-	Vm = SubBase(Vm);
-
-	if (single_reg)
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x1) << 22) | (0x31 << 16) \
-			| ((Vd & 0x1E) << 11) | (0x29 << 6) | ((Vm & 0x1) << 5) | (Vm >> 1));
-	}
-	else
-	{
-		Write32(condition | (0x1D << 23) | ((Vd & 0x10) << 18) | (0x31 << 16) \
-			| ((Vd & 0xF) << 12) | (0x2D << 6) | ((Vm & 0x10) << 2) | (Vm & 0xF));
-	}
-}
-
 void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src, bool high)
 {
-	_assert_msg_(DYNA_REC, Src < S0, "This VMOV doesn't support SRC other than ARM Reg");
-	_assert_msg_(DYNA_REC, Dest >= D0, "This VMOV doesn't support DEST other than VFP");
+	_dbg_assert_msg_(DYNA_REC, Src < S0, "This VMOV doesn't support SRC other than ARM Reg");
+	_dbg_assert_msg_(DYNA_REC, Dest >= D0, "This VMOV doesn't support DEST other than VFP");
 
 	Dest = SubBase(Dest);
 
 	Write32(condition | (0xE << 24) | (high << 21) | ((Dest & 0xF) << 16) | (Src << 12) \
-		| (11 << 8) | ((Dest & 0x10) << 3) | (1 << 4));
+		| (0xB << 8) | ((Dest & 0x10) << 3) | (1 << 4));
 }
 
 void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src)
@@ -1269,7 +1154,7 @@ void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src)
 			else
 			{
 				// Move 64bit from Arm reg
-				_assert_msg_(DYNA_REC, false, "This VMOV doesn't support moving 64bit ARM to NEON");
+				_dbg_assert_msg_(DYNA_REC, false, "This VMOV doesn't support moving 64bit ARM to NEON");
 				return;
 			}
 		}
@@ -1289,14 +1174,14 @@ void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src)
 			else
 			{
 				// Move 64bit To Arm reg
-				_assert_msg_(DYNA_REC, false, "This VMOV doesn't support moving 64bit ARM From NEON");
+				_dbg_assert_msg_(DYNA_REC, false, "This VMOV doesn't support moving 64bit ARM From NEON");
 				return;
 			}
 		}
 		else
 		{
 			// Move Arm reg to Arm reg
-			_assert_msg_(DYNA_REC, false, "VMOV doesn't support moving ARM registers");
+			_dbg_assert_msg_(DYNA_REC, false, "VMOV doesn't support moving ARM registers");
 		}
 	}
 	// Moving NEON registers
@@ -1305,7 +1190,7 @@ void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src)
 	bool Single = DestSize == 1;
 	bool Quad = DestSize == 4;
 
-	_assert_msg_(DYNA_REC, SrcSize == DestSize, "VMOV doesn't support moving different register sizes");
+	_dbg_assert_msg_(DYNA_REC, SrcSize == DestSize, "VMOV doesn't support moving different register sizes");
 
 	Dest = SubBase(Dest);
 	Src = SubBase(Src);
@@ -1320,7 +1205,7 @@ void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src)
 		// Double and quad
 		if (Quad)
 		{
-			_assert_msg_(DYNA_REC, cpu_info.bNEON, "Trying to use quad registers when you don't support ASIMD."); 
+			_dbg_assert_msg_(DYNA_REC, cpu_info.bNEON, "Trying to use quad registers when you don't support ASIMD."); 
 			// Gets encoded as a Double register
 			Write32((0xF2 << 24) | ((Dest & 0x10) << 18) | (2 << 20) | ((Src & 0xF) << 16) \
 				| ((Dest & 0xF) << 12) | (1 << 8) | ((Src & 0x10) << 3) | (1 << 6) \
@@ -1338,13 +1223,39 @@ void ARMXEmitter::VMOV(ARMReg Dest, ARMReg Src)
 void ARMXEmitter::VCVT(ARMReg Dest, ARMReg Source, int flags)
 {
 	bool single_reg = (Dest < D0) && (Source < D0);
+	bool single_double = !single_reg && (Source < D0 || Dest < D0);
+	bool single_to_double = Source < D0;
 	int op  = ((flags & TO_INT) ? (flags & ROUND_TO_ZERO) : (flags & IS_SIGNED)) ? 1 : 0;
 	int op2 = ((flags & TO_INT) ? (flags & IS_SIGNED) : 0) ? 1 : 0;
 	Dest = SubBase(Dest);
 	Source = SubBase(Source);
 
-	if (single_reg)
+	if (single_double)
 	{
+		// S32<->F64
+		if ((flags & TO_INT) || (flags & TO_FLOAT))
+		{
+			if (single_to_double)
+			{
+				Write32(condition | (0x1D << 23) | ((Dest & 0x10) << 18) | (0x7 << 19) \
+					| ((Dest & 0xF) << 12) | (op << 7) | (0x2D << 6) | ((Source & 0x1) << 5) | (Source >> 1));
+			} else {
+				Write32(condition | (0x1D << 23) | ((Dest & 0x1) << 22) | (0x7 << 19) | ((flags & TO_INT) << 18) | (op2 << 16) \
+					| ((Dest & 0x1E) << 11) | (op << 7) | (0x2D << 6) | ((Source & 0x10) << 1) | (Source & 0xF));
+			}
+		}
+		// F32<->F64
+		else {
+			if (single_to_double)
+			{
+				Write32(condition | (0x1D << 23) | ((Dest & 0x10) << 18) | (0x3 << 20) | (0x7 << 16) \
+					| ((Dest & 0xF) << 12) | (0x2B << 6) | ((Source & 0x1) << 5) | (Source >> 1));
+			} else {
+				Write32(condition | (0x1D << 23) | ((Dest & 0x1) << 22) | (0x3 << 20) | (0x7 << 16) \
+					| ((Dest & 0x1E) << 11) | (0x2F << 6) | ((Source & 0x10) << 1) | (Source & 0xF));
+			}
+		}
+	} else if (single_reg) {
 		Write32(condition | (0x1D << 23) | ((Dest & 0x1) << 22) | (0x7 << 19) | ((flags & TO_INT) << 18) | (op2 << 16) \
 			| ((Dest & 0x1E) << 11) | (op << 7) | (0x29 << 6) | ((Source & 0x1) << 5) | (Source >> 1));
 	} else {

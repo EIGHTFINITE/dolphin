@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 // Fast image conversion using OpenGL shaders.
 // This kind of stuff would be a LOT nicer with OpenCL.
@@ -45,7 +32,7 @@ static GLuint s_texConvFrameBuffer = 0;
 static GLuint s_srcTexture = 0;			// for decoding from RAM
 static GLuint s_srcTextureWidth = 0;
 static GLuint s_srcTextureHeight = 0;
-static GLuint s_dstRenderBuffer = 0;	// for encoding to RAM
+static GLuint s_dstTexture = 0;		// for encoding to RAM
 
 const int renderBufferWidth = 1024;
 const int renderBufferHeight = 1024;
@@ -66,13 +53,13 @@ static int s_cached_srcWidth = 0;
 static int s_cached_srcHeight = 0;
 
 static const char *VProgram =
-	"in vec2 rawpos;\n"
-	"in vec2 tex0;\n"
-	"out vec2 uv0;\n"
+	"ATTRIN vec2 rawpos;\n"
+	"ATTRIN vec2 tex0;\n"
+	"VARYOUT vec2 uv0;\n"
 	"void main()\n"
 	"{\n"
 	"	uv0 = tex0;\n"
-	"	gl_Position = vec4(rawpos,0,1);\n"
+	"	gl_Position = vec4(rawpos, 0.0f, 1.0f);\n"
 	"}\n";
 
 void CreatePrograms()
@@ -80,8 +67,8 @@ void CreatePrograms()
 	// Output is BGRA because that is slightly faster than RGBA.
 	const char *FProgramRgbToYuyv =
 		"uniform sampler2DRect samp9;\n"
-		"in vec2 uv0;\n"
-		"out vec4 ocol0;\n"
+		"VARYIN vec2 uv0;\n"
+		"COLOROUT(ocol0)\n"
 		"void main()\n"
 		"{\n"
 		"	vec3 c0 = texture2DRect(samp9, uv0).rgb;\n"
@@ -96,8 +83,8 @@ void CreatePrograms()
 
 	const char *FProgramYuyvToRgb =
 		"uniform sampler2DRect samp9;\n"
-		"in vec2 uv0;\n"
-		"out vec4 ocol0;\n"
+		"VARYIN vec2 uv0;\n"
+		"COLOROUT(ocol0)\n"
 		"void main()\n"
 		"{\n"
 		"	vec4 c0 = texture2DRect(samp9, uv0).rgba;\n"
@@ -111,7 +98,7 @@ void CreatePrograms()
 		"		yComp + (2.018f * uComp),\n"
 		"		1.0f);\n"
 		"}\n";
-		
+
 	ProgramShaderCache::CompileShader(s_rgbToYuyvProgram, VProgram, FProgramRgbToYuyv);
 	ProgramShaderCache::CompileShader(s_yuyvToRgbProgram, VProgram, FProgramYuyvToRgb);
 }
@@ -140,14 +127,14 @@ SHADER &GetOrCreateEncodingShader(u32 format)
 #endif
 
 		ProgramShaderCache::CompileShader(s_encodingPrograms[format], VProgram, shader);
-    }
+	}
 	return s_encodingPrograms[format];
 }
 
 void Init()
 {
 	glGenFramebuffers(1, &s_texConvFrameBuffer);
-	
+
 	glGenBuffers(1, &s_encode_VBO );
 	glGenVertexArrays(1, &s_encode_VAO );
 	glBindBuffer(GL_ARRAY_BUFFER, s_encode_VBO );
@@ -160,7 +147,7 @@ void Init()
 	s_cached_sourceRc.bottom = -1;
 	s_cached_sourceRc.left = -1;
 	s_cached_sourceRc.right = -1;
-	
+
 	glGenBuffers(1, &s_decode_VBO );
 	glGenVertexArrays(1, &s_decode_VAO );
 	glBindBuffer(GL_ARRAY_BUFFER, s_decode_VBO );
@@ -172,19 +159,18 @@ void Init()
 	glEnableVertexAttribArray(SHADER_TEXTURE0_ATTRIB);
 	glVertexAttribPointer(SHADER_TEXTURE0_ATTRIB, 2, GL_FLOAT, 0, sizeof(GLfloat)*4, (GLfloat*)NULL+2);
 
-	glGenRenderbuffers(1, &s_dstRenderBuffer);
-	glBindRenderbuffer(GL_RENDERBUFFER, s_dstRenderBuffer);
-	
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA, renderBufferWidth, renderBufferHeight);
-
 	s_srcTextureWidth = 0;
 	s_srcTextureHeight = 0;
 
+	glActiveTexture(GL_TEXTURE0 + 9);
 	glGenTextures(1, &s_srcTexture);
-	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, s_srcTexture);
-	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+	glBindTexture(getFbType(), s_srcTexture);
+	glTexParameteri(getFbType(), GL_TEXTURE_MAX_LEVEL, 0);
+
+	glGenTextures(1, &s_dstTexture);
+	glBindTexture(GL_TEXTURE_2D, s_dstTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, renderBufferWidth, renderBufferHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 	
 	CreatePrograms();
 }
@@ -192,7 +178,7 @@ void Init()
 void Shutdown()
 {
 	glDeleteTextures(1, &s_srcTexture);
-	glDeleteRenderbuffers(1, &s_dstRenderBuffer);
+	glDeleteTextures(1, &s_dstTexture);
 	glDeleteFramebuffers(1, &s_texConvFrameBuffer);
 	glDeleteBuffers(1, &s_encode_VBO );
 	glDeleteVertexArrays(1, &s_encode_VAO );
@@ -206,13 +192,13 @@ void Shutdown()
 		s_encodingPrograms[i].Destroy();
 
 	s_srcTexture = 0;
-	s_dstRenderBuffer = 0;
+	s_dstTexture = 0;
 	s_texConvFrameBuffer = 0;
 }
 
 void EncodeToRamUsingShader(GLuint srcTexture, const TargetRectangle& sourceRc,
-					    u8* destAddr, int dstWidth, int dstHeight, int readStride,
-						   	bool toTexture, bool linearFilter)
+						u8* destAddr, int dstWidth, int dstHeight, int readStride,
+							bool toTexture, bool linearFilter)
 {
 
 
@@ -220,23 +206,22 @@ void EncodeToRamUsingShader(GLuint srcTexture, const TargetRectangle& sourceRc,
 	// attach render buffer as color destination
 	FramebufferManager::SetFramebuffer(s_texConvFrameBuffer);
 
-	glBindRenderbuffer(GL_RENDERBUFFER, s_dstRenderBuffer);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s_dstRenderBuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_dstTexture, 0);
 	GL_REPORT_ERRORD();
 
 	// set source texture
 	glActiveTexture(GL_TEXTURE0+9);
-	glBindTexture(GL_TEXTURE_RECTANGLE, srcTexture);
+	glBindTexture(getFbType(), srcTexture);
 
 	if (linearFilter)
 	{
-		glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(getFbType(), GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(getFbType(), GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	}
 	else
 	{
-		glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(getFbType(), GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(getFbType(), GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	}
 
 	GL_REPORT_ERRORD();
@@ -250,10 +235,10 @@ void EncodeToRamUsingShader(GLuint srcTexture, const TargetRectangle& sourceRc,
 			(float)sourceRc.left, (float)sourceRc.top,
 			-1.f, 1.f,
 			(float)sourceRc.left, (float)sourceRc.bottom,
-			1.f, 1.f,
-			(float)sourceRc.right, (float)sourceRc.bottom,
 			1.f, -1.f,
-			(float)sourceRc.right, (float)sourceRc.top
+			(float)sourceRc.right, (float)sourceRc.top,
+			1.f, 1.f,
+			(float)sourceRc.right, (float)sourceRc.bottom
 		};
 		glBindBuffer(GL_ARRAY_BUFFER, s_encode_VBO );
 		glBufferData(GL_ARRAY_BUFFER, 4*4*sizeof(GLfloat), vertices, GL_STREAM_DRAW);
@@ -262,9 +247,7 @@ void EncodeToRamUsingShader(GLuint srcTexture, const TargetRectangle& sourceRc,
 	} 
 
 	glBindVertexArray( s_encode_VAO );
-	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-	
-	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	
 	GL_REPORT_ERRORD();
 
@@ -369,14 +352,14 @@ void EncodeToRamYUYV(GLuint srcTexture, const TargetRectangle& sourceRc, u8* des
 	EncodeToRamUsingShader(srcTexture, sourceRc, destAddr, dstWidth / 2, dstHeight, 0, false, false);
 	FramebufferManager::SetFramebuffer(0);
 	VertexShaderManager::SetViewportChanged();
-    TextureCache::DisableStage(0);
+	TextureCache::DisableStage(0);
 	g_renderer->RestoreAPIState();
 	GL_REPORT_ERRORD();
 }
 
 
 // Should be scale free.
-void DecodeToTexture(u32 xfbAddr, int srcWidth, int srcHeight, GLuint destRenderbuf)
+void DecodeToTexture(u32 xfbAddr, int srcWidth, int srcHeight, GLuint destTexture)
 {
 	u8* srcAddr = Memory::GetPointer(xfbAddr);
 	if (!srcAddr)
@@ -392,24 +375,24 @@ void DecodeToTexture(u32 xfbAddr, int srcWidth, int srcHeight, GLuint destRender
 	// switch to texture converter frame buffer
 	// attach destTexture as color destination
 	FramebufferManager::SetFramebuffer(s_texConvFrameBuffer);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, destRenderbuf);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, destTexture, 0);
 
 	GL_REPORT_FBO_ERROR();
 
 	// activate source texture
 	// set srcAddr as data for source texture
 	glActiveTexture(GL_TEXTURE0+9);
-	glBindTexture(GL_TEXTURE_RECTANGLE, s_srcTexture);
+	glBindTexture(getFbType(), s_srcTexture);
 
 	// TODO: make this less slow.  (How?)
 	if ((GLsizei)s_srcTextureWidth == (GLsizei)srcFmtWidth && (GLsizei)s_srcTextureHeight == (GLsizei)srcHeight)
 	{
-		glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0,0,0,s_srcTextureWidth, s_srcTextureHeight,
+		glTexSubImage2D(getFbType(), 0,0,0,s_srcTextureWidth, s_srcTextureHeight,
 				GL_BGRA, GL_UNSIGNED_BYTE, srcAddr);
 	}
 	else
 	{
-		glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA8, (GLsizei)srcFmtWidth, (GLsizei)srcHeight,
+		glTexImage2D(getFbType(), 0, GL_RGBA8, (GLsizei)srcFmtWidth, (GLsizei)srcHeight,
 				0, GL_BGRA, GL_UNSIGNED_BYTE, srcAddr);
 		s_srcTextureWidth = (GLsizei)srcFmtWidth;
 		s_srcTextureHeight = (GLsizei)srcHeight;
@@ -426,10 +409,10 @@ void DecodeToTexture(u32 xfbAddr, int srcWidth, int srcHeight, GLuint destRender
 			(float)srcFmtWidth, (float)srcHeight,
 			1.f, 1.f,
 			(float)srcFmtWidth, 0.f,
-			-1.f, 1.f,
-			0.f, 0.f,
 			-1.f, -1.f,
-			0.f, (float)srcHeight
+			0.f, (float)srcHeight,
+			-1.f, 1.f,
+			0.f, 0.f
 		};
 		
 		glBindBuffer(GL_ARRAY_BUFFER, s_decode_VBO );
@@ -440,12 +423,9 @@ void DecodeToTexture(u32 xfbAddr, int srcWidth, int srcHeight, GLuint destRender
 	}
 	
 	glBindVertexArray( s_decode_VAO );
-	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	
 	GL_REPORT_ERRORD();
-
-	// reset state
-	glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
 
 	VertexShaderManager::SetViewportChanged();
 

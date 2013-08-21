@@ -1,24 +1,12 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "Globals.h"
 #include "GLUtil.h"
 #include "StreamBuffer.h"
 #include "MemoryUtil.h"
+#include "Render.h"
 
 namespace OGL
 {
@@ -31,19 +19,21 @@ StreamBuffer::StreamBuffer(u32 type, size_t size, StreamType uploadType)
 {
 	glGenBuffers(1, &m_buffer);
 	
-	bool nvidia = !strcmp((const char*)glGetString(GL_VENDOR), "NVIDIA Corporation");
+	bool nvidia = !strcmp(g_ogl_config.gl_vendor, "NVIDIA Corporation");
 	
-	if(m_uploadtype == STREAM_DETECT)
+	if(m_uploadtype & STREAM_DETECT)
 	{
-		if(!g_Config.backend_info.bSupportsGLBaseVertex)
+		if(!g_ogl_config.bSupportsGLBaseVertex && (m_uploadtype & BUFFERDATA))
+			m_uploadtype = BUFFERDATA;
+		else if(!g_ogl_config.bSupportsGLBaseVertex && (m_uploadtype & BUFFERSUBDATA))
 			m_uploadtype = BUFFERSUBDATA;
-		else if(g_Config.backend_info.bSupportsGLSync && g_Config.bHackedBufferUpload)
+		else if(g_ogl_config.bSupportsGLSync && g_Config.bHackedBufferUpload && (m_uploadtype & MAP_AND_RISK))
 			m_uploadtype = MAP_AND_RISK;
-		else if(g_Config.backend_info.bSupportsGLSync && g_Config.backend_info.bSupportsGLPinnedMemory)
+		else if(g_ogl_config.bSupportsGLSync && g_ogl_config.bSupportsGLPinnedMemory && (m_uploadtype & PINNED_MEMORY))
 			m_uploadtype = PINNED_MEMORY;
-		else if(nvidia)
+		else if(nvidia && (m_uploadtype & BUFFERSUBDATA))
 			m_uploadtype = BUFFERSUBDATA;
-		else if(g_Config.backend_info.bSupportsGLSync)
+		else if(g_ogl_config.bSupportsGLSync && (m_uploadtype & MAP_AND_SYNC))
 			m_uploadtype = MAP_AND_SYNC;
 		else 
 			m_uploadtype = MAP_AND_ORPHAN;
@@ -121,9 +111,11 @@ void StreamBuffer::Alloc ( size_t size, u32 stride )
 		}
 		break;
 	case BUFFERSUBDATA:
+	case BUFFERDATA:
 		m_iterator_aligned = 0;
 		break;
 	case STREAM_DETECT:
+	case DETECT_MASK: // Just to shutup warnings
 		break;
 	}
 	m_iterator = m_iterator_aligned;
@@ -139,7 +131,7 @@ size_t StreamBuffer::Upload ( u8* data, size_t size )
 			memcpy(pointer, data, size);
 			glUnmapBuffer(m_buffertype);
 		} else {
-			ERROR_LOG(VIDEO, "buffer mapping failed");
+			ERROR_LOG(VIDEO, "Buffer mapping failed");
 		}
 		break;
 	case PINNED_MEMORY:
@@ -150,7 +142,11 @@ size_t StreamBuffer::Upload ( u8* data, size_t size )
 	case BUFFERSUBDATA:
 		glBufferSubData(m_buffertype, m_iterator, size, data);
 		break;
+	case BUFFERDATA:
+		glBufferData(m_buffertype, size, data, GL_STREAM_DRAW);
+		break;
 	case STREAM_DETECT:
+	case DETECT_MASK: // Just to shutup warnings
 		break;
 	}
 	size_t ret = m_iterator;
@@ -189,7 +185,7 @@ void StreamBuffer::Init()
 		
 		// on error, switch to another backend. some old catalyst seems to have broken pinned memory support
 		if(glGetError() != GL_NO_ERROR) {
-			ERROR_LOG(VIDEO, "pinned memory detected, but not working. Please report this: %s, %s, %s", glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION));
+			ERROR_LOG(VIDEO, "Pinned memory detected, but not working. Please report this: %s, %s, %s", g_ogl_config.gl_vendor, g_ogl_config.gl_renderer, g_ogl_config.gl_version);
 			Shutdown();
 			m_uploadtype = MAP_AND_SYNC;
 			Init();
@@ -198,12 +194,16 @@ void StreamBuffer::Init()
 	case MAP_AND_RISK:
 		glBindBuffer(m_buffertype, m_buffer);
 		glBufferData(m_buffertype, m_size, NULL, GL_STREAM_DRAW);
-		pointer = (u8*)glMapBuffer(m_buffertype, GL_WRITE_ONLY);
+		pointer = (u8*)glMapBufferRange(m_buffertype, 0, m_size, GL_MAP_WRITE_BIT);
 		glUnmapBuffer(m_buffertype);
 		if(!pointer)
-			ERROR_LOG(VIDEO, "buffer allocation failed");
-		
+			ERROR_LOG(VIDEO, "Buffer allocation failed");
+		break;
+	case BUFFERDATA:
+		glBindBuffer(m_buffertype, m_buffer);
+		break;
 	case STREAM_DETECT:
+	case DETECT_MASK: // Just to shutup warnings
 		break;
 	}
 }
@@ -220,6 +220,7 @@ void StreamBuffer::Shutdown()
 	case MAP_AND_RISK:
 	case MAP_AND_ORPHAN:
 	case BUFFERSUBDATA:
+	case BUFFERDATA:
 		break;
 	case PINNED_MEMORY:
 		for(u32 i=0; i<SYNC_POINTS; i++)
@@ -230,6 +231,7 @@ void StreamBuffer::Shutdown()
 		FreeAlignedMemory(pointer);
 		break;
 	case STREAM_DETECT:
+	case DETECT_MASK: // Just to shutup warnings
 		break;
 	}
 }

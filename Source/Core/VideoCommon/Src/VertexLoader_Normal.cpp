@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "Common.h"
 #include "VideoCommon.h"
@@ -46,14 +33,16 @@ __forceinline float FracAdjust(T val)
 	//auto const U8FRAC = 1.f / (1u << 7);
 	//auto const S16FRAC = 1.f / (1u << 14);
 	//auto const U16FRAC = 1.f / (1u << 15);
-	
+
 	// TODO: is this right?
 	return val / float(1u << (sizeof(T) * 8 - std::numeric_limits<T>::is_signed - 1));
 }
 
 template <>
 __forceinline float FracAdjust(float val)
-{ return val; }
+{
+	return val;
+}
 
 template <typename T, int N>
 __forceinline void ReadIndirect(const T* data)
@@ -64,7 +53,7 @@ __forceinline void ReadIndirect(const T* data)
 	{
 		DataWrite(FracAdjust(Common::FromBigEndian(data[i])));
 	}
-	
+
 	LOG_NORM();
 }
 
@@ -77,7 +66,7 @@ struct Normal_Direct
 		ReadIndirect<T, N * 3>(source);
 		DataSkip<N * 3 * sizeof(T)>();
 	}
-	
+
 	static const int size = sizeof(T) * N * 3;
 };
 
@@ -99,7 +88,7 @@ struct Normal_Index
 	{
 		Normal_Index_Offset<I, T, N, 0>();
 	}
-	
+
 	static const int size = sizeof(I);
 };
 
@@ -112,7 +101,7 @@ struct Normal_Index_Indices3
 		Normal_Index_Offset<I, T, 1, 1>();
 		Normal_Index_Offset<I, T, 1, 2>();
 	}
-	
+
 	static const int size = sizeof(I) * 3;
 };
 
@@ -200,5 +189,5 @@ TPipelineFunction VertexLoader_Normal::GetFunction(unsigned int _type,
 	unsigned int _format, unsigned int _elements, unsigned int _index3)
 {
 	TPipelineFunction pFunc = m_Table[_type][_index3][_elements][_format].function;
-    return pFunc;
+	return pFunc;
 }

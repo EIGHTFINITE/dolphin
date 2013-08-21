@@ -31,12 +31,6 @@ void cInterfaceAGL::Swap()
 	[GLWin.cocoaCtx flushBuffer];
 }
 
-// Show the current FPS
-void cInterfaceAGL::UpdateFPSDisplay(const char *text)
-{
-	[[GLWin.cocoaWin window] setTitle: [NSString stringWithUTF8String: text]];
-}
-
 // Create rendering window.
 //		Call browser: Core.cpp:EmuThread() > main.cpp:Video_Initialize()
 bool cInterfaceAGL::Create(void *&window_handle)
@@ -44,12 +38,21 @@ bool cInterfaceAGL::Create(void *&window_handle)
 	int _tx, _ty, _twidth, _theight;
 	Host_GetRenderWindowSize(_tx, _ty, _twidth, _theight);
 
+	GLWin.cocoaWin = (NSView*)(((wxPanel*)window_handle)->GetHandle());
+
+	// Enable high-resolution display support.
+	[GLWin.cocoaWin setWantsBestResolutionOpenGLSurface:YES];
+
+	NSWindow *window = [GLWin.cocoaWin window];
+
+	float scale = [window backingScaleFactor];
+	_twidth *= scale;
+	_theight *= scale;
+
 	// Control window size and picture scaling
 	s_backbuffer_width = _twidth;
 	s_backbuffer_height = _theight;
 
-	NSRect size;
-	NSUInteger style = NSMiniaturizableWindowMask;
 	NSOpenGLPixelFormatAttribute attr[] = { NSOpenGLPFADoubleBuffer, NSOpenGLPFAOpenGLProfile, NSOpenGLProfileVersion3_2Core, NSOpenGLPFAAccelerated, 0 };
 	NSOpenGLPixelFormat *fmt = [[NSOpenGLPixelFormat alloc]
 		initWithAttributes: attr];
@@ -66,46 +69,29 @@ bool cInterfaceAGL::Create(void *&window_handle)
 		return NULL;
 	}
 
-	if (SConfig::GetInstance().m_LocalCoreStartupParameter.bFullscreen) {
-		size = [[NSScreen mainScreen] frame];
-		style |= NSBorderlessWindowMask;
-	} else {
-		size = NSMakeRect(_tx, _ty, _twidth, _theight);
-		style |= NSResizableWindowMask | NSTitledWindowMask;
-	}
-
-	GLWin.cocoaWin = (NSView*)(((wxPanel*)window_handle)->GetHandle());;
 	if (GLWin.cocoaWin == nil) {
 		ERROR_LOG(VIDEO, "failed to create window");
 		return NULL;
 	}
 
-	if (SConfig::GetInstance().m_LocalCoreStartupParameter.bFullscreen) {
-		CGDisplayCapture(CGMainDisplayID());
-		[GLWin.cocoaWin setLevel: CGShieldingWindowLevel()];
-	}
-
+	[window makeFirstResponder:GLWin.cocoaWin];
 	[GLWin.cocoaCtx setView: GLWin.cocoaWin];
-	[[GLWin.cocoaWin window] makeKeyAndOrderFront: nil];
+	[window makeKeyAndOrderFront: nil];
 
 	return true;
 }
 
 bool cInterfaceAGL::MakeCurrent()
 {
-	int width, height;
-
-	width = [GLWin.cocoaWin frame].size.width;
-	height = [GLWin.cocoaWin frame].size.height;
-	//if (width == s_backbuffer_width && height == s_backbuffer_height)
-	//	return true;
-
-	[GLWin.cocoaCtx setView: GLWin.cocoaWin];
-	[GLWin.cocoaCtx update];
 	[GLWin.cocoaCtx makeCurrentContext];
-	s_backbuffer_width = width;
-	s_backbuffer_height = height;
-  return true;
+	return true;
+}
+
+bool cInterfaceAGL::ClearCurrent()
+{
+	// not tested at all
+	//clearCurrentContext();
+	return true;
 }
 
 // Close backend
@@ -113,6 +99,26 @@ void cInterfaceAGL::Shutdown()
 {
 	[GLWin.cocoaCtx clearDrawable];
 	[GLWin.cocoaCtx release];
+	GLWin.cocoaCtx = nil;
+}
+
+void cInterfaceAGL::Update()
+{
+	NSWindow *window = [GLWin.cocoaWin window];
+	NSSize size = [GLWin.cocoaWin frame].size;
+
+	float scale = [window backingScaleFactor];
+	size.width *= scale;
+	size.height *= scale;
+
+	if( s_backbuffer_width == size.width
+	   && s_backbuffer_height == size.height)
+		return;
+	
+	s_backbuffer_width = size.width;
+	s_backbuffer_height = size.height;
+	
+	[GLWin.cocoaCtx update];
 }
 
 

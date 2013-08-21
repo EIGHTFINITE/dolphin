@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "D3DBase.h"
 #include "PixelShaderCache.h"
@@ -141,6 +128,9 @@ void VertexManager::PrepareDrawBuffers()
 	memcpy((u16*)map.pData + m_point_draw_index, GetPointIndexBuffer(), sizeof(u16) * IndexGenerator::GetPointindexLen());
 	D3D::context->Unmap(m_index_buffers[m_current_index_buffer], 0);
 	m_index_buffer_cursor += iCount;
+	
+	ADDSTAT(stats.thisFrame.bytesVertexStreamed, vSize);
+	ADDSTAT(stats.thisFrame.bytesIndexStreamed, iCount*sizeof(u16));
 }
 
 static const float LINE_PT_TEX_OFFSETS[8] = {
@@ -154,7 +144,7 @@ void VertexManager::Draw(UINT stride)
 	
 	if (IndexGenerator::GetNumTriangles() > 0)
 	{
-		D3D::context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		D3D::context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 		D3D::context->DrawIndexed(IndexGenerator::GetTriangleindexLen(), m_triangle_draw_index, 0);
 		INCSTAT(stats.thisFrame.numIndexedDrawCalls);
 	}
@@ -248,7 +238,7 @@ void VertexManager::vFlush()
 
 	// set global constants
 	VertexShaderManager::SetConstants();
-	PixelShaderManager::SetConstants();
+	PixelShaderManager::SetConstants(g_nativeVertexFmt->m_components);
 
 	bool useDstAlpha = !g_ActiveConfig.bDstAlphaPass && bpmem.dstalpha.enable && bpmem.blendmode.alphaupdate &&
 		bpmem.zcontrol.pixel_format == PIXELFMT_RGBA6_Z24;

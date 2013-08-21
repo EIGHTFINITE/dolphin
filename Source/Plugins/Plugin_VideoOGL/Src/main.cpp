@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 
 
@@ -96,6 +83,7 @@ Make AA apply instantly during gameplay if possible
 #include "PerfQuery.h"
 
 #include "VideoState.h"
+#include "IndexGenerator.h"
 #include "VideoBackend.h"
 #include "ConfigManager.h"
 
@@ -103,6 +91,11 @@ namespace OGL
 {
 
 std::string VideoBackend::GetName()
+{
+	return "OGL";
+}
+
+std::string VideoBackend::GetDisplayName()
 {
 	return "OpenGL";
 }
@@ -136,12 +129,13 @@ void InitBackendInfo()
 	g_Config.backend_info.bUseRGBATextures = true;
 	g_Config.backend_info.bUseMinimalMipCount = false;
 	g_Config.backend_info.bSupports3DVision = false;
-	//g_Config.backend_info.bSupportsDualSourceBlend = true; // is gpu depenend and must be set in renderer
-	g_Config.backend_info.bSupportsFormatReinterpretation = false;
+	//g_Config.backend_info.bSupportsDualSourceBlend = true; // is gpu dependent and must be set in renderer
+	g_Config.backend_info.bSupportsFormatReinterpretation = true;
 	g_Config.backend_info.bSupportsPixelLighting = true;
+	//g_Config.backend_info.bSupportsEarlyZ = true; // is gpu dependent and must be set in renderer
 
 	// aamodes
-	const char* caamodes[] = {"None", "2x", "4x", "8x", "8x CSAA", "8xQ CSAA", "16x CSAA", "16xQ CSAA"};
+	const char* caamodes[] = {_trans("None"), "2x", "4x", "8x", "8x CSAA", "8xQ CSAA", "16x CSAA", "16xQ CSAA", "4x SSAA"};
 	g_Config.backend_info.AAModes.assign(caamodes, caamodes + sizeof(caamodes)/sizeof(*caamodes));
 
 	// pp shaders
@@ -174,6 +168,9 @@ bool VideoBackend::Initialize(void *&window_handle)
 	if (!GLInterface->Create(window_handle))
 		return false;
 
+	// Do our OSD callbacks	
+	OSD::DoCallbacks(OSD::OSD_INIT);
+
 	s_BackendInitialized = true;
 
 	return true;
@@ -199,6 +196,7 @@ void VideoBackend::Video_Prepare()
 	g_perf_query = new PerfQuery;
 	Fifo_Init(); // must be done before OpcodeDecoder_Init()
 	OpcodeDecoder_Init();
+	IndexGenerator::Init();
 	VertexShaderManager::Init();
 	PixelShaderManager::Init();
 	ProgramShaderCache::Init();
@@ -220,6 +218,10 @@ void VideoBackend::Video_Prepare()
 void VideoBackend::Shutdown()
 {
 	s_BackendInitialized = false;
+
+	// Do our OSD callbacks	
+	OSD::DoCallbacks(OSD::OSD_SHUTDOWN);
+
 	GLInterface->Shutdown();
 }
 
@@ -248,11 +250,14 @@ void VideoBackend::Video_Cleanup() {
 		ProgramShaderCache::Shutdown();
 		VertexShaderManager::Shutdown();
 		PixelShaderManager::Shutdown();
+		delete g_perf_query;
+		g_perf_query = NULL;
 		delete g_vertex_manager;
 		g_vertex_manager = NULL;
 		OpcodeDecoder_Shutdown();
 		delete g_renderer;
 		g_renderer = NULL;
+		GLInterface->ClearCurrent();
 	}
 }
 

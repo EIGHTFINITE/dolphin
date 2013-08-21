@@ -1,19 +1,7 @@
-// Copyright (C) 2003 Dolphin Project.
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
 
 #include "Common.h"
 #include "MemoryUtil.h"
@@ -32,6 +20,7 @@
 #include <linux/ashmem.h>
 #endif
 #endif
+#include <set>
 
 #if defined(__APPLE__)
 static const char* ram_temp_file = "/tmp/gc_mem.tmp";
@@ -47,10 +36,10 @@ int AshmemCreateFileMapping(const char *name, size_t size)
 	fd = open(ASHMEM_DEVICE, O_RDWR);
 	if (fd < 0)
 		return fd;
-	
+
 	// We don't really care if we can't set the name, it is optional	
 	ret = ioctl(fd, ASHMEM_SET_NAME, name);
-	
+
 	ret = ioctl(fd, ASHMEM_SET_SIZE, size);
 	if (ret < 0)
 	{
@@ -153,12 +142,21 @@ u8* MemArena::Find4GBBase()
 	}
 	return base;
 #else
-	void* base = mmap(0, 0x31000000, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+#ifdef ANDROID
+	const u32 MemSize = 0x04000000;
+#else
+	const u32 MemSize = 0x31000000; 
+#endif
+	void* base = mmap(0, MemSize, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
 	if (base == MAP_FAILED) {
 		PanicAlert("Failed to map 1 GB of memory space: %s", strerror(errno));
 		return 0;
 	}
-	munmap(base, 0x31000000);
+#ifndef ANDROID
+	// Android 4.3 changes how munmap works which causes crashes.
+	// Keep the memory space after allocating it...
+	munmap(base, MemSize);
+#endif
 	return static_cast<u8*>(base);
 #endif
 #endif
@@ -221,27 +219,7 @@ static bool Memory_TryBase(u8 *base, const MemoryView *views, int num_views, u32
 
 bail:
 	// Argh! ERROR! Free what we grabbed so far so we can try again.
-	for (int j = 0; j <= i; j++)
-	{
-		SKIP(flags, views[i].flags);
-		if (views[j].out_ptr_low && *views[j].out_ptr_low)
-		{
-			arena->ReleaseView(*views[j].out_ptr_low, views[j].size);
-			*views[j].out_ptr_low = NULL;
-		}
-		if (*views[j].out_ptr)
-		{
-#ifdef _M_X64
-			arena->ReleaseView(*views[j].out_ptr, views[j].size);
-#else
-			if (!(views[j].flags & MV_MIRROR_PREVIOUS))
-			{
-				arena->ReleaseView(*views[j].out_ptr, views[j].size);
-			}
-#endif
-			*views[j].out_ptr = NULL;
-		}
-	}
+	MemoryMap_Shutdown(views, i+1, flags, arena);
 	return false;
 }
 
@@ -307,15 +285,20 @@ u8 *MemoryMap_Setup(const MemoryView *views, int num_views, u32 flags, MemArena 
 
 void MemoryMap_Shutdown(const MemoryView *views, int num_views, u32 flags, MemArena *arena)
 {
+	std::set<void*> freeset;
 	for (int i = 0; i < num_views; i++)
 	{
-		SKIP(flags, views[i].flags);
-		if (views[i].out_ptr_low && *views[i].out_ptr_low)
-			arena->ReleaseView(*views[i].out_ptr_low, views[i].size);
-		if (*views[i].out_ptr && (views[i].out_ptr_low && *views[i].out_ptr != *views[i].out_ptr_low))
-			arena->ReleaseView(*views[i].out_ptr, views[i].size);
-		*views[i].out_ptr = NULL;
-		if (views[i].out_ptr_low) 
-			*views[i].out_ptr_low = NULL;
+		const MemoryView* view = &views[i];
+		u8** outptrs[2] = {view->out_ptr_low, view->out_ptr};
+		for (int j = 0; j < 2; j++)
+		{
+			u8** outptr = outptrs[j];
+			if (outptr && *outptr && !freeset.count(*outptr))
+			{
+				arena->ReleaseView(*outptr, view->size);
+				freeset.insert(*outptr);
+				*outptr = NULL;
+			}
+		}
 	}
 }

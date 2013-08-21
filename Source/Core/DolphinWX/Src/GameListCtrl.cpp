@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "Globals.h"
 
@@ -36,6 +23,7 @@
 #include "WxUtils.h"
 #include "Main.h"
 #include "MathUtil.h"
+#include "HW/DVDInterface.h"
 
 #include "../resources/Flag_Europe.xpm"
 #include "../resources/Flag_Germany.xpm"
@@ -61,7 +49,7 @@ bool sorted = false;
 extern CFrame* main_frame;
 
 static int CompareGameListItems(const GameListItem* iso1, const GameListItem* iso2,
-                                long sortData = CGameListCtrl::COLUMN_TITLE)
+								long sortData = CGameListCtrl::COLUMN_TITLE)
 {
 	int t = 1;
 
@@ -187,6 +175,8 @@ CGameListCtrl::CGameListCtrl(wxWindow* parent, const wxWindowID id, const
 		wxPoint& pos, const wxSize& size, long style)
 	: wxListCtrl(parent, id, pos, size, style), toolTip(0)
 {
+	DragAcceptFiles(true);
+	Connect(wxEVT_DROP_FILES, wxDropFilesEventHandler(CGameListCtrl::OnDropFiles), NULL, this);
 }
 
 CGameListCtrl::~CGameListCtrl()
@@ -732,7 +722,9 @@ void CGameListCtrl::OnKeyPress(wxListEvent& event)
 				continue;
 			}
 			else if (lastKey != event.GetKeyCode())
+			{
 				sLoop = 0;
+			}
 
 			lastKey = event.GetKeyCode();
 			sLoop++;
@@ -801,7 +793,9 @@ void CGameListCtrl::OnMouseMotion(wxMouseEvent& event)
 				toolTip = new wxEmuStateTip(this, StrToWxStr(temp), &toolTip);
 			}
 			else
+			{
 				toolTip = new wxEmuStateTip(this, _("Not Set"), &toolTip);
+			}
 
 			// Get item Coords
 			GetItemRect(item, Rect);
@@ -891,8 +885,11 @@ void CGameListCtrl::OnRightClick(wxMouseEvent& event)
 				else if (selected_iso->GetFileName().substr(selected_iso->GetFileName().find_last_of(".")) != ".ciso" 
 						 && selected_iso->GetFileName().substr(selected_iso->GetFileName().find_last_of(".")) != ".wbfs")
 					popupMenu->Append(IDM_COMPRESSGCM, _("Compress ISO..."));
-			} else
+			}
+			else
+			{
 				popupMenu->Append(IDM_LIST_INSTALLWAD, _("Install to Wii Menu"));
+			}
 
 			PopupMenu(popupMenu);
 		}
@@ -911,14 +908,20 @@ void CGameListCtrl::OnRightClick(wxMouseEvent& event)
 const GameListItem * CGameListCtrl::GetSelectedISO()
 {
 	if (m_ISOFiles.size() == 0)
+	{
 		return NULL;
+	}
 	else if (GetSelectedItemCount() == 0)
+	{
 		return NULL;
+	}
 	else
 	{
 		long item = GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
 		if (item == wxNOT_FOUND)
+		{
 			return NULL;
+		}
 		else
 		{
 			// Here is a little workaround for multiselections:
@@ -988,7 +991,7 @@ void CGameListCtrl::OnSetDefaultGCM(wxCommandEvent& event)
 	}
 	else
 	{
-		// Othwerise blank the value and save it
+		// Otherwise blank the value and save it
 		SConfig::GetInstance().m_LocalCoreStartupParameter.m_strDefaultGCM = "";
 		SConfig::GetInstance().SaveSettings();
 	}
@@ -1030,6 +1033,7 @@ void CGameListCtrl::OnProperties(wxCommandEvent& WXUNUSED (event))
 	const GameListItem *iso = GetSelectedISO();
 	if (!iso)
 		return;
+
 	CISOProperties ISOProperties(iso->GetFileName(), this);
 	if(ISOProperties.ShowModal() == wxID_OK)
 		Update();
@@ -1249,7 +1253,9 @@ void CGameListCtrl::OnCompressGCM(wxCommandEvent& WXUNUSED (event))
 
 void CGameListCtrl::OnSize(wxSizeEvent& event)
 {
-	if (lastpos == event.GetSize()) return;
+	if (lastpos == event.GetSize())
+		return;
+
 	lastpos = event.GetSize();
 	AutomaticColumnWidth();
 
@@ -1261,7 +1267,9 @@ void CGameListCtrl::AutomaticColumnWidth()
 	wxRect rc(GetClientRect());
 
 	if (GetColumnCount() == 1)
+	{
 		SetColumnWidth(0, rc.GetWidth());
+	}
 	else if (GetColumnCount() > 4)
 	{
 		int resizable = rc.GetWidth() - (
@@ -1291,7 +1299,38 @@ void CGameListCtrl::UnselectAll()
 	{
 		SetItemState(i, 0, wxLIST_STATE_SELECTED);
 	}
-
 }
 
+void CGameListCtrl::OnDropFiles(wxDropFilesEvent& event)
+{
+	if (event.GetNumberOfFiles() != 1)
+		return;
+	if (File::IsDirectory(WxStrToStr(event.GetFiles()[0])))
+		return;
 
+	wxFileName file = event.GetFiles()[0];
+
+	if (file.GetExt() == "dtm")
+	{
+		if (Core::IsRunning())
+			return;
+
+		if (!Movie::IsReadOnly())
+		{
+			// let's make the read-only flag consistent at the start of a movie.
+			Movie::SetReadOnly(true);
+			main_frame->GetMenuBar()->FindItem(IDM_RECORDREADONLY)->Check(true);
+		}
+
+		if (Movie::PlayInput(file.GetFullPath().c_str()))
+			main_frame->BootGame(std::string(""));
+	}
+	else if (!Core::IsRunning())
+	{
+		main_frame->BootGame(WxStrToStr(file.GetFullPath()));
+	}
+	else
+	{
+		DVDInterface::ChangeDisc(WxStrToStr(file.GetFullPath()).c_str());
+	}
+}

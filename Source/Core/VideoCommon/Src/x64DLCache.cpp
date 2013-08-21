@@ -1,19 +1,6 @@
-// Copyright (C) 2003-2009 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 // TODO: Handle cache-is-full condition :p
 
@@ -106,22 +93,22 @@ struct CachedDisplayList
 	// Compile the commands themselves down to native code.
 	const u8* compiled_code;
 	u32 uncachable;  // if set, this DL will always be interpreted. This gets set if hash ever changes.
-	// Analitic data
+	// Analytic data
 	u32 num_xf_reg;
 	u32 num_cp_reg;
 	u32 num_bp_reg; 
 	u32 num_index_xf;
-	u32 num_draw_call;	
+	u32 num_draw_call;
 	u32 pass;
 	u32 check;
-	int frame_count;	
+	int frame_count;
 	u32 BufferCount;
 
 	void InsertRegion(ReferencedDataRegion* NewRegion)
 	{
 		if(LastRegion)
 		{
-			LastRegion->NextRegion = NewRegion;			
+			LastRegion->NextRegion = NewRegion;
 		}
 		LastRegion = NewRegion;
 		if(!Regions)
@@ -174,7 +161,7 @@ struct CachedDisplayList
 			Current = Current->NextRegion;
 		}
 		return true;
-	}	
+	}
 
 	ReferencedDataRegion* FindOverlapingRegion(u8* RegionStart, u32 Regionsize)
 	{
@@ -182,7 +169,7 @@ struct CachedDisplayList
 		while(Current)
 		{
 			if(!Current->IntersectsMemoryRange(RegionStart, Regionsize))
-					return Current;			
+				return Current;
 			Current = Current->NextRegion;
 		}
 		return Current;
@@ -330,7 +317,7 @@ u32 AnalyzeAndRunDisplayList(u32 address, u32 size, CachedDisplayList *dl)
 					u32 addr = DataReadU32();
 					u32 count = DataReadU32();
 					ExecuteDisplayList(addr, count);
-				}			
+				}
 				break;
 			case GX_CMD_UNKNOWN_METRICS: // zelda 4 swords calls it and checks the metrics registers after that
 				DEBUG_LOG(VIDEO, "GX 0x44: %08x", cmd_byte);
@@ -392,7 +379,7 @@ u32 AnalyzeAndRunDisplayList(u32 address, u32 size, CachedDisplayList *dl)
 	dl->num_draw_call = num_draw_call;
 	dl->num_index_xf = num_index_xf;
 	dl->num_xf_reg = num_xf_reg;
-    // reset to the old pointer
+	// reset to the old pointer
 	g_pVideoData = old_pVideoData;	
 	return result;
 }
@@ -458,7 +445,7 @@ void CompileAndRunDisplayList(u32 address, u32 size, CachedDisplayList *dl)
 					NewRegion->MustClean = true;
 					NewRegion->size = transfer_size * 4;
 					NewRegion->start_address = (u8*) new u8[NewRegion->size+15+12];  // alignment and guaranteed space
-					NewRegion->hash = 0;					
+					NewRegion->hash = 0;
 					dl->InsertRegion(NewRegion);
 					u32 *data_buffer = (u32*)(u8*)(((size_t)NewRegion->start_address+0xf)&~0xf);
 					DataReadU32xFuncs[transfer_size-1](data_buffer);
@@ -539,7 +526,6 @@ void CompileAndRunDisplayList(u32 address, u32 size, CachedDisplayList *dl)
 				if (cmd_byte & 0x80)
 				{
 					// load vertices (use computed vertex size from FifoCommandRunnable above)
-					
 					u16 numVertices = DataReadU16();
 					if(numVertices > 0)
 					{
@@ -558,7 +544,7 @@ void CompileAndRunDisplayList(u32 address, u32 size, CachedDisplayList *dl)
 							NewRegion->MustClean = true;
 							NewRegion->size = Vdatasize;
 							NewRegion->start_address = (u8*)new u8[Vdatasize]; 
-							NewRegion->hash = 0;					
+							NewRegion->hash = 0;
 							dl->InsertRegion(NewRegion);
 							memcpy(NewRegion->start_address, StartAddress, Vdatasize);
 							emitter.ABI_CallFunctionCCCP((void *)&VertexLoaderManager::RunCompiledVertices, cmd_byte & GX_VAT_MASK, (cmd_byte & GX_PRIMITIVE_MASK) >> GX_PRIMITIVE_SHIFT, numVertices, NewRegion->start_address);
@@ -577,7 +563,6 @@ void CompileAndRunDisplayList(u32 address, u32 size, CachedDisplayList *dl)
 							}
 						}
 					}
-					
 				}
 				else
 				{
@@ -613,45 +598,55 @@ void Shutdown()
 void Clear() 
 {
 	VDLMap::iterator iter = dl_map.begin();
-	while (iter != dl_map.end()) {
+	while (iter != dl_map.end())
+	{
 		VDlist &ParentEntry = iter->second;
 		DLMap::iterator childiter = ParentEntry.dl_map.begin();
-		while (childiter != ParentEntry.dl_map.end()) {
+		while (childiter != ParentEntry.dl_map.end())
+		{
 			CachedDisplayList &entry = childiter->second;
 			entry.ClearRegions();
 			childiter++;
 		}
+
 		ParentEntry.dl_map.clear();
 		iter++;
 	}
 	dl_map.clear();
 	// Reset the cache pointers.
-	emitter.SetCodePtr(dlcode_cache);	
+	emitter.SetCodePtr(dlcode_cache);
 }
 
 void ProgressiveCleanup()
 {
 	VDLMap::iterator iter = dl_map.begin();
-	while (iter != dl_map.end()) {
+	while (iter != dl_map.end())
+	{
 		VDlist &ParentEntry = iter->second;
 		DLMap::iterator childiter = ParentEntry.dl_map.begin();
 		while (childiter != ParentEntry.dl_map.end()) 
 		{
 			CachedDisplayList &entry = childiter->second;
 			int limit = 3600;
-			if (entry.frame_count < frameCount - limit) {
+			if (entry.frame_count < frameCount - limit)
+			{
 				entry.ClearRegions();
 				ParentEntry.dl_map.erase(childiter++);  // (this is gcc standard!)
 			}
 			else
+			{
 				++childiter;
+			}
 		}
+
 		if(ParentEntry.dl_map.empty())
 		{
 			dl_map.erase(iter++);
 		}
 		else
+		{
 			iter++;
+		}
 	}
 }
 
@@ -668,10 +663,12 @@ bool HandleDisplayList(u32 address, u32 size)
 	//Fixed DlistCaching now is fully functional still some things to workout
 	if(!g_ActiveConfig.bDlistCachingEnable)
 		return false;
-	if(size == 0) return false;
+	if(size == 0)
+		return false;
 
-	// Is this thread safe?
-	if (DLCache::GetSpaceLeft() < DL_CODE_CLEAR_THRESHOLD) {
+	// TODO: Is this thread safe?
+	if (DLCache::GetSpaceLeft() < DL_CODE_CLEAR_THRESHOLD)
+	{
 		DLCache::Clear();
 	}
 
@@ -680,18 +677,20 @@ bool HandleDisplayList(u32 address, u32 size)
 	DLCache::VDLMap::iterator Parentiter = DLCache::dl_map.find(dl_id);
 	DLCache::DLMap::iterator iter;
 	bool childexist = false;
+
 	if (Parentiter != DLCache::dl_map.end())
 	{
 		vhash = DLCache::CreateVMapId(Parentiter->second.VATUsed);
 		iter = 	Parentiter->second.dl_map.find(vhash);
-		childexist = iter != Parentiter->second.dl_map.end();		
+		childexist = iter != Parentiter->second.dl_map.end();
 	}
+
 	if (Parentiter != DLCache::dl_map.end() && childexist)
 	{
 		DLCache::CachedDisplayList &dl = iter->second;
 		if (dl.uncachable)
 		{
-			return false;			
+			return false;
 		}
 
 		switch (dl.pass)
@@ -700,7 +699,7 @@ bool HandleDisplayList(u32 address, u32 size)
 			// First, check that the hash is the same as the last time.
 			if (dl.dl_hash != GetHash64(Memory::GetPointer(address), size, 0))
 			{
-				dl.uncachable = true;				
+				dl.uncachable = true;
 				return false;
 			}
 			DLCache::CompileAndRunDisplayList(address, size, &dl);
@@ -717,7 +716,7 @@ bool HandleDisplayList(u32 address, u32 size)
 				if (DlistChanged) 
 				{
 					dl.uncachable = true;
-					dl.ClearRegions();						
+					dl.ClearRegions();
 					return false;
 				}
 				dl.frame_count= frameCount;
@@ -764,10 +763,9 @@ bool HandleDisplayList(u32 address, u32 size)
 		vdl.VATUsed = dlvatused; 
 		vdl.count = 1;
 		DLCache::dl_map[dl_id] = vdl;
-
 	}
+
 	return true;
-	
 }
 
 void IncrementCheckContextId()

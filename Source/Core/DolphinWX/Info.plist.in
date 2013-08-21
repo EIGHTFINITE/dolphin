@@ -28,7 +28,7 @@
 	<key>CFBundleIconFile</key>
 	<string>Dolphin.icns</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.dolphin-emulator.dolphin</string>
+	<string>org.dolphin-emu.dolphin</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
 	<key>CFBundleLocalizations</key>
@@ -56,6 +56,8 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>${OSX_MIN_VERSION}</string>
 	<key>LSRequiresCarbon</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>CSResourcesFileMapped</key>
 	<true/>
