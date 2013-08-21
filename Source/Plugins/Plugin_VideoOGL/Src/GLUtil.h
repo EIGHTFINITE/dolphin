@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #ifndef _GLINIT_H_
 #define _GLINIT_H_
@@ -33,7 +20,19 @@
 #define TEX2D	GL_TEXTURE_2D
 #define PREC	"highp"
 #define TEXTYPE "sampler2D"
-#define TEXFUNC "texture"
+#define TEXFUNC "texture2D"
+#ifdef USE_GLES3
+#include "GLFunctions.h"
+#define GLAPIENTRY GL_APIENTRY
+#define GL_SAMPLES_PASSED GL_ANY_SAMPLES_PASSED
+#define GL_READ_ONLY                      0x88B8
+#define GL_WRITE_ONLY                     0x88B9
+#define GL_READ_WRITE                     0x88BA
+#define GL_SRC1_ALPHA 0
+#define GL_BGRA GL_RGBA
+#define glDrawElementsBaseVertex
+#define glDrawRangeElementsBaseVertex
+#endif
 #else
 #define TEX2D	GL_TEXTURE_RECTANGLE_ARB
 #define PREC 

@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "MemoryUtil.h"
 
@@ -45,6 +32,7 @@ TextureCache::TexCache TextureCache::textures;
 
 TextureCache::BackupConfig TextureCache::backup_config;
 
+bool invalidate_texture_cache_requested;
 
 TextureCache::TCacheEntryBase::~TCacheEntryBase()
 {
@@ -55,10 +43,20 @@ TextureCache::TextureCache()
 	temp_size = 2048 * 2048 * 4;
 	if (!temp)
 		temp = (u8*)AllocateAlignedMemory(temp_size, 16);
+
 	TexDecoder_SetTexFmtOverlayOptions(g_ActiveConfig.bTexFmtOverlayEnable, g_ActiveConfig.bTexFmtOverlayCenter);
-    if(g_ActiveConfig.bHiresTextures && !g_ActiveConfig.bDumpTextures)
+
+	if(g_ActiveConfig.bHiresTextures && !g_ActiveConfig.bDumpTextures)
 		HiresTextures::Init(SConfig::GetInstance().m_LocalCoreStartupParameter.m_strUniqueID.c_str());
+
 	SetHash64Function(g_ActiveConfig.bHiresTextures || g_ActiveConfig.bDumpTextures);
+
+	invalidate_texture_cache_requested = false;
+}
+
+void TextureCache::RequestInvalidateTextureCache()
+{
+	invalidate_texture_cache_requested = true;
 }
 
 void TextureCache::Invalidate()
@@ -90,7 +88,8 @@ void TextureCache::OnConfigChanged(VideoConfig& config)
 		if (config.iSafeTextureCache_ColorSamples != backup_config.s_colorsamples ||
 			config.bTexFmtOverlayEnable != backup_config.s_texfmt_overlay ||
 			config.bTexFmtOverlayCenter != backup_config.s_texfmt_overlay_center ||
-			config.bHiresTextures != backup_config.s_hires_textures)
+			config.bHiresTextures != backup_config.s_hires_textures ||
+			invalidate_texture_cache_requested)
 		{
 			g_texture_cache->Invalidate();
 
@@ -99,6 +98,8 @@ void TextureCache::OnConfigChanged(VideoConfig& config)
 
 			SetHash64Function(g_ActiveConfig.bHiresTextures || g_ActiveConfig.bDumpTextures);
 			TexDecoder_SetTexFmtOverlayOptions(g_ActiveConfig.bTexFmtOverlayEnable, g_ActiveConfig.bTexFmtOverlayCenter);
+
+			invalidate_texture_cache_requested = false;
 		}
 
 		// TODO: Probably shouldn't clear all render targets here, just mark them dirty or something.
@@ -138,7 +139,9 @@ void TextureCache::Cleanup()
 			textures.erase(iter++);
 		}
 		else
+		{
 			++iter;
+		}
 	}
 }
 
@@ -156,7 +159,9 @@ void TextureCache::InvalidateRange(u32 start_address, u32 size)
 			textures.erase(iter++);
 		}
 		else
+		{
 			++iter;
+		}
 	}
 }
 
@@ -214,7 +219,9 @@ void TextureCache::ClearRenderTargets()
 			textures.erase(iter++);
 		}
 		else
+		{
 			++iter;
+		}
 	}
 }
 
@@ -395,7 +402,7 @@ TextureCache::TCacheEntryBase* TextureCache::Load(unsigned int const stage,
 
 			// TODO: Print a warning if the format changes! In this case,
 			// we could reinterpret the internal texture object data to the new pixel format
-			// (similiar to what is already being done in Renderer::ReinterpretPixelFormat())
+			// (similar to what is already being done in Renderer::ReinterpretPixelFormat())
 			return ReturnEntry(stage, entry);
 		}
 
@@ -560,17 +567,20 @@ void TextureCache::CopyRenderTargetToTexture(u32 dstAddr, unsigned int dstFormat
 	const EFBRectangle& srcRect, bool isIntensity, bool scaleByHalf)
 {
 	// Emulation methods:
+	// 
 	// - EFB to RAM:
 	//		Encodes the requested EFB data at its native resolution to the emulated RAM using shaders.
 	//		Load() decodes the data from there again (using TextureDecoder) if the EFB copy is being used as a texture again.
 	//		Advantage: CPU can read data from the EFB copy and we don't lose any important updates to the texture
 	//		Disadvantage: Encoding+decoding steps often are redundant because only some games read or modify EFB copies before using them as textures.
+	// 
 	// - EFB to texture:
 	//		Copies the requested EFB data to a texture object in VRAM, performing any color conversion using shaders.
 	//		Advantage:	Works for many games, since in most cases EFB copies aren't read or modified at all before being used as a texture again.
 	//					Since we don't do any further encoding or decoding here, this method is much faster.
 	//					It also allows enhancing the visual quality by doing scaled EFB copies.
-	// - hybrid EFB copies:
+	// 
+	// - Hybrid EFB copies:
 	//		1a) Whenever this function gets called, encode the requested EFB data to RAM (like EFB to RAM)
 	//		1b) Set type to TCET_EC_DYNAMIC for all texture cache entries in the destination address range.
 	//			If EFB copy caching is enabled, further checks will (try to) prevent redundant EFB copies.
@@ -685,8 +695,8 @@ void TextureCache::CopyRenderTargetToTexture(u32 dstAddr, unsigned int dstFormat
 				}
 				else
 				{
-					cbufid = 9;	
-				}				
+					cbufid = 9;
+				}
 			}
 			else// alpha
 			{
@@ -725,7 +735,7 @@ void TextureCache::CopyRenderTargetToTexture(u32 dstAddr, unsigned int dstFormat
 		case 1: // R8
 		case 8: // R8
 			colmat[0] = colmat[4] = colmat[8] = colmat[12] = 1;
-			cbufid = 13;			
+			cbufid = 13;
 			break;
 
 		case 2: // RA4
@@ -746,11 +756,11 @@ void TextureCache::CopyRenderTargetToTexture(u32 dstAddr, unsigned int dstFormat
 
 		case 9: // G8
 			colmat[1] = colmat[5] = colmat[9] = colmat[13] = 1.0f;
-			cbufid = 17;			
+			cbufid = 17;
 			break;
 		case 10: // B8
 			colmat[2] = colmat[6] = colmat[10] = colmat[14] = 1.0f;
-			cbufid = 18;			
+			cbufid = 18;
 			break;
 
 		case 11: // RG8
@@ -759,7 +769,7 @@ void TextureCache::CopyRenderTargetToTexture(u32 dstAddr, unsigned int dstFormat
 			break;
 
 		case 12: // GB8
-			colmat[1] = colmat[5] = colmat[9] = colmat[14] = 1.0f;			
+			colmat[1] = colmat[5] = colmat[9] = colmat[14] = 1.0f;
 			cbufid = 20;
 			break;
 

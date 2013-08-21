@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #ifndef _PIXELENGINE_H
 #define _PIXELENGINE_H
@@ -24,13 +11,13 @@ class PointerWrap;
 // internal hardware addresses
 enum
 {
-	PE_ZCONF         = 0x00, // Z Config
-	PE_ALPHACONF     = 0x02, // Alpha Config
-	PE_DSTALPHACONF  = 0x04, // Destination Alpha Config
-	PE_ALPHAMODE     = 0x06, // Alpha Mode Config
-	PE_ALPHAREAD     = 0x08, // Alpha Read
+	PE_ZCONF		 = 0x00, // Z Config
+	PE_ALPHACONF	 = 0x02, // Alpha Config
+	PE_DSTALPHACONF	 = 0x04, // Destination Alpha Config
+	PE_ALPHAMODE	 = 0x06, // Alpha Mode Config
+	PE_ALPHAREAD	 = 0x08, // Alpha Read
 	PE_CTRL_REGISTER = 0x0a, // Control
-	PE_TOKEN_REG     = 0x0e, // Token
+	PE_TOKEN_REG	 = 0x0e, // Token
 	PE_BBOX_LEFT	 = 0x10, // Flip Left
 	PE_BBOX_RIGHT	 = 0x12, // Flip Right
 	PE_BBOX_TOP		 = 0x14, // Flip Top

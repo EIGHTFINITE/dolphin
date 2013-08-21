@@ -1,19 +1,7 @@
-// Copyright (C) 2003 Dolphin Project.
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
 
 #ifndef _POINTERWRAP_H_
 #define _POINTERWRAP_H_
@@ -32,6 +20,7 @@
 #include <list>
 #include <deque>
 #include <string>
+#include <type_traits>
 
 #include "Common.h"
 #include "FileUtil.h"
@@ -69,7 +58,7 @@ public:
 	{
 		u32 count = (u32)x.size();
 		Do(count);
-		
+
 		switch (mode)
 		{
 		case MODE_READ:
@@ -81,7 +70,7 @@ public:
 				x.insert(pair);
 			}
 			break;
-		
+
 		case MODE_WRITE:
 		case MODE_MEASURE:
 		case MODE_VERIFY:
@@ -93,14 +82,14 @@ public:
 			break;
 		}
 	}
-	
+
 	template <typename T>
 	void DoContainer(T& x)
 	{
 		u32 size = (u32)x.size();
 		Do(size);
 		x.resize(size);
-		
+
 		for (auto itr = x.begin(); itr != x.end(); ++itr)
 			Do(*itr);
 	}
@@ -110,38 +99,44 @@ public:
 	{
 		DoContainer(x);
 	}
-	
+
 	template <typename T>
 	void Do(std::list<T>& x)
 	{
 		DoContainer(x);
 	}
-	
+
 	template <typename T>
 	void Do(std::deque<T>& x)
 	{
 		DoContainer(x);
 	}
-	
+
 	template <typename T>
 	void Do(std::basic_string<T>& x)
 	{
 		DoContainer(x);
 	}
 
-    template <typename T>
+	template <typename T>
 	void DoArray(T* x, u32 count)
 	{
 		for (u32 i = 0; i != count; ++i)
 			Do(x[i]);
-    }
-	
+	}
+
 	template <typename T>
 	void Do(T& x)
 	{
-		// TODO: Bad, Do(some_non_POD) will compile and fail at runtime
-		// type_traits are not fully supported everywhere yet
+		// Ideally this would be std::is_trivially_copyable, but not enough support yet
+		static_assert(std::is_pod<T>::value, "Only sane for POD types");
 		
+		DoVoid((void*)&x, sizeof(x));
+	}
+	
+	template <typename T>
+	void DoPOD(T& x)
+	{
 		DoVoid((void*)&x, sizeof(x));
 	}
 
@@ -220,7 +215,7 @@ public:
 	{
 		u32 cookie = arbitraryNumber;
 		Do(cookie);
-		
+
 		if (mode == PointerWrap::MODE_READ && cookie != arbitraryNumber)
 		{
 			PanicAlertT("Error: After \"%s\", found %d (0x%X) instead of save marker %d (0x%X). Aborting savestate load...",
@@ -228,7 +223,7 @@ public:
 			mode = PointerWrap::MODE_MEASURE;
 		}
 	}
-	
+
 private:
 	__forceinline void DoByte(u8& x)
 	{
@@ -237,27 +232,27 @@ private:
 		case MODE_READ:
 			x = **ptr;
 			break;
-			
+
 		case MODE_WRITE:
 			**ptr = x;
 			break;
-			
+
 		case MODE_MEASURE:
 			break;
-			
+
 		case MODE_VERIFY:
 			_dbg_assert_msg_(COMMON, (x == **ptr),
 				"Savestate verification failure: %d (0x%X) (at %p) != %d (0x%X) (at %p).\n",
 					x, x, &x, **ptr, **ptr, *ptr);
 			break;
-			
+
 		default:
 			break;
 		}
-			
+
 		++(*ptr);
 	}
-	
+
 	void DoVoid(void *data, u32 size)
 	{
 		for(u32 i = 0; i != size; ++i)
@@ -300,7 +295,7 @@ public:
 			ERROR_LOG(COMMON,"ChunkReader: Bad header size");
 			return false;
 		}
-		
+
 		// Check revision
 		if (header.Revision != _Revision)
 		{
@@ -308,7 +303,7 @@ public:
 				header.Revision, _Revision);
 			return false;
 		}
-		
+
 		// get size
 		const u32 sz = (u32)(fileSize - headerSize);
 		if (header.ExpectedSize != sz)
@@ -317,7 +312,7 @@ public:
 				sz, header.ExpectedSize);
 			return false;
 		}
-		
+
 		// read the state
 		std::vector<u8> buffer(sz);
 		if (!pFile.ReadArray(&buffer[0], sz))
@@ -333,7 +328,7 @@ public:
 		INFO_LOG(COMMON, "ChunkReader: Done loading %s" , _rFilename.c_str());
 		return true;
 	}
-	
+
 	// Save file template
 	template<class T>
 	static bool Save(const std::string& _rFilename, u32 _Revision, T& _class)
@@ -355,12 +350,12 @@ public:
 		ptr = &buffer[0];
 		p.SetMode(PointerWrap::MODE_WRITE);
 		_class.DoState(p);
-		
+
 		// Create header
 		SChunkHeader header;
 		header.Revision = _Revision;
 		header.ExpectedSize = (u32)sz;
-		
+
 		// Write to file
 		if (!pFile.WriteArray(&header, 1))
 		{
@@ -373,11 +368,11 @@ public:
 			ERROR_LOG(COMMON,"ChunkReader: Failed writing data");
 			return false;
 		}
-		
+
 		INFO_LOG(COMMON,"ChunkReader: Done writing %s", _rFilename.c_str());
 		return true;
 	}
-	
+
 private:
 	struct SChunkHeader
 	{

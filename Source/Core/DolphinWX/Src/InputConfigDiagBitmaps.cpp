@@ -1,19 +1,6 @@
-// Copyright (C) 2010 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include "InputConfigDiag.h"
 #include "WxUtils.h"
@@ -102,22 +89,64 @@ void InputConfigDialog::UpdateBitmaps(wxTimerEvent& WXUNUSED(event))
 						dc.DrawRectangle( 0, 31 - z*31, 64, 2);
 					}
 
-					// circle for visual aid for diagonal adjustment
+					// octagon for visual aid for diagonal adjustment
 					dc.SetPen(*wxLIGHT_GREY_PEN);
 					dc.SetBrush(*wxWHITE_BRUSH);
 					if ( GROUP_TYPE_STICK == (*g)->control_group->type )
 					{
-						dc.SetBrush(*wxTRANSPARENT_BRUSH);
-						dc.DrawCircle( 32, 32, 32);
+						// outline and fill colors
+						wxBrush LightGrayBrush(_T("#dddddd"));
+						wxPen LightGrayPen(_T("#bfbfbf"));
+						dc.SetBrush(LightGrayBrush);
+						dc.SetPen(LightGrayPen);
+
+						// polygon offset
+						float max
+							, diagonal
+							, box = 64
+							, d_of = box / 256.0
+							, x_of = box / 2.0;
+
+						if (strcmp((*g)->control_group->name, "Main Stick") == 0)
+						{
+							max = (87.0 / 127.0) * 100;
+							diagonal = (55.0 / 127.0) * 100.0;
+						}
+						else if (strcmp((*g)->control_group->name,"C-Stick") == 0)
+						{
+							max = (74.0 / 127.0) * 100;
+							diagonal = (46.0 / 127.0) * 100;
+						}
+						else
+						{
+							max = (82.0 / 127.0) * 100;
+							diagonal = (58.0 / 127.0) * 100;
+						}
+
+						// polygon corners
+						wxPoint Points[8];
+						Points[0].x = (int)(0.0 * d_of + x_of); Points[0].y = (int)(max * d_of + x_of);
+						Points[1].x = (int)(diagonal * d_of + x_of); Points[1].y = (int)(diagonal * d_of + x_of);
+						Points[2].x = (int)(max * d_of + x_of); Points[2].y = (int)(0.0 * d_of + x_of);
+						Points[3].x = (int)(diagonal * d_of + x_of); Points[3].y = (int)(-diagonal * d_of + x_of);
+						Points[4].x = (int)(0.0 * d_of + x_of); Points[4].y = (int)(-max * d_of + x_of);
+						Points[5].x = (int)(-diagonal * d_of + x_of); Points[5].y = (int)(-diagonal * d_of + x_of);
+						Points[6].x = (int)(-max * d_of + x_of); Points[6].y = (int)(0.0 * d_of + x_of);
+						Points[7].x = (int)(-diagonal * d_of + x_of); Points[7].y = (int)(diagonal * d_of + x_of);
+
+						// draw polygon
+						dc.DrawPolygon(8, Points);
 					}
 					else
+					{
 						dc.DrawRectangle( 16, 16, 32, 32 );
+					}
 
 					if ( GROUP_TYPE_CURSOR != (*g)->control_group->type )
 					{
 						// deadzone circle
 						dc.SetBrush(*wxLIGHT_GREY_BRUSH);
-						dc.DrawCircle( 32, 32, ((*g)->control_group)->settings[0]->value * 32 );
+						dc.DrawCircle( 32, 32, ((*g)->control_group)->settings[SETTING_DEADZONE]->value * 32 );
 					}
 
 					// raw dot
@@ -217,7 +246,9 @@ void InputConfigDialog::UpdateBitmaps(wxTimerEvent& WXUNUSED(event))
 					for (unsigned int n = 0; n<button_count; ++n)
 					{
 						if ( buttons & bitmasks[n] )
+						{
 							dc.SetBrush( *wxRED_BRUSH );
+						}
 						else
 						{
 							unsigned char amt = 255 - (*g)->control_group->controls[n]->control_ref->State() * 128;

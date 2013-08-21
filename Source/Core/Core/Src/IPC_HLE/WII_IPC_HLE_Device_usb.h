@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #pragma once
 
@@ -25,6 +12,7 @@
 #include "WII_IPC_HLE.h"
 #include "WII_IPC_HLE_Device.h"
 #include "WII_IPC_HLE_WiiMote.h"
+#include "../HW/Wiimote.h"
 
 struct SQueuedEvent
 {
@@ -51,6 +39,12 @@ struct SQueuedEvent
 	}
 };
 
+// Hacks for ChunkFile to accept SQueuedEvent as POD
+namespace std
+{
+template <>
+struct is_pod<SQueuedEvent> : std::true_type {};
+}
 
 // Important to remember that this class is for /dev/usb/oh1/57e/305 ONLY
 // /dev/usb/oh1 -> internal usb bus
@@ -96,7 +90,7 @@ private:
 
 	enum USBEndpoint
 	{
-		HCI_CTRL		= 0x00,	
+		HCI_CTRL		= 0x00,
 		HCI_EVENT		= 0x81,
 		ACL_DATA_IN		= 0x82,
 		ACL_DATA_OUT	= 0x02
@@ -200,7 +194,7 @@ private:
 		}
 	} m_acl_pool;
 
-	u32 m_PacketCount[4];
+	u32 m_PacketCount[MAX_BBMOTES];
 	u64 m_last_ticks;
 
 	// Send ACL data to a device (wiimote)
@@ -247,7 +241,7 @@ private:
 	void CommandDisconnect(u8* _Input);
 	void CommandLinkKeyNegRep(u8* _Input);
 	void CommandLinkKeyRep(u8* _Input);
-    void CommandDeleteStoredLinkKey(u8* _Input);
+	void CommandDeleteStoredLinkKey(u8* _Input);
 	void CommandChangeConPacketType(u8* _Input);
 
 	// OGF 0x02	Link policy commands and return parameters
@@ -281,7 +275,6 @@ private:
 
 #pragma pack(push,1)
 #define CONF_PAD_MAX_REGISTERED 10
-#define CONF_PAD_MAX_ACTIVE 4
 	
 	struct _conf_pad_device
 	{
@@ -293,7 +286,7 @@ private:
 	{
 		u8 num_registered;
 		_conf_pad_device registered[CONF_PAD_MAX_REGISTERED];
-		_conf_pad_device active[CONF_PAD_MAX_ACTIVE];
+		_conf_pad_device active[MAX_WIIMOTES];
 		_conf_pad_device balance_board;
 		u8 unknown[0x45];
 	};

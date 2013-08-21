@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 #include <memory.h>
 
@@ -39,7 +26,7 @@
 #include <machine/cpufunc.h>
 #else
 static inline void do_cpuid(unsigned int *eax, unsigned int *ebx,
-						    unsigned int *ecx, unsigned int *edx)
+							unsigned int *ecx, unsigned int *edx)
 {
 #if defined _M_GENERIC
 	(*eax) = (*ebx) = (*ecx) = (*edx) = 0;
@@ -74,7 +61,7 @@ static inline void do_cpuid(unsigned int *eax, unsigned int *ebx,
 static void __cpuid(int info[4], int x)
 {
 #if defined __FreeBSD__
-    do_cpuid((unsigned int)x, (unsigned int*)info);
+	do_cpuid((unsigned int)x, (unsigned int*)info);
 #else
 	unsigned int eax = x, ebx = 0, ecx = 0, edx = 0;
 	do_cpuid(&eax, &ebx, &ecx, &edx);
@@ -83,6 +70,14 @@ static void __cpuid(int info[4], int x)
 	info[2] = ecx;
 	info[3] = edx;
 #endif
+}
+
+#define _XCR_XFEATURE_ENABLED_MASK 0
+static unsigned long long _xgetbv(unsigned int index)
+{
+	unsigned int eax, edx;
+	__asm__ __volatile__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(index));
+	return ((unsigned long long)edx << 32) | eax;
 }
 
 #endif
@@ -162,8 +157,17 @@ void CPUInfo::Detect()
 		if ((cpu_id[2] >> 9)  & 1) bSSSE3 = true;
 		if ((cpu_id[2] >> 19) & 1) bSSE4_1 = true;
 		if ((cpu_id[2] >> 20) & 1) bSSE4_2 = true;
-		if ((cpu_id[2] >> 28) & 1) bAVX = true;
 		if ((cpu_id[2] >> 25) & 1) bAES = true;
+
+		// AVX support requires 3 separate checks:
+		//  - Is the AVX bit set in CPUID?
+		//  - Is the XSAVE bit set in CPUID?
+		//  - XGETBV result has the XCR bit set.
+		if (((cpu_id[2] >> 28) & 1) && ((cpu_id[2] >> 27) & 1))
+		{
+			if (_xgetbv(_XCR_XFEATURE_ENABLED_MASK) & 0x6)
+				bAVX = true;
+		}
 	}
 	if (max_ex_fn >= 0x80000004) {
 		// Extract brand string

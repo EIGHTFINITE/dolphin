@@ -1,19 +1,6 @@
-// Copyright (C) 2003 Dolphin Project.
-
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, version 2.0.
-
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License 2.0 for more details.
-
-// A copy of the GPL 2.0 should have been included with the program.
-// If not, see http://www.gnu.org/licenses/
-
-// Official SVN repository and contact information can be found at
-// http://code.google.com/p/dolphin-emu/
+// Copyright 2013 Dolphin Emulator Project
+// Licensed under GPLv2
+// Refer to the license.txt file included.
 
 
 #ifndef WIIMOTE_REAL_H
@@ -33,8 +20,7 @@
 
 #include "../../InputCommon/Src/InputConfig.h"
 
-// Pointer to data, and size of data
-typedef std::pair<u8*,u8> Report;
+typedef std::vector<u8> Report;
 
 namespace WiimoteReal
 {
@@ -50,7 +36,7 @@ public:
 	void InterruptChannel(const u16 channel, const void* const data, const u32 size);
 	void Update();
 
-	Report ProcessReadQueue();
+	const Report& ProcessReadQueue();
 
 	bool Read();
 	bool Write();
@@ -61,6 +47,8 @@ public:
 	// "handshake" / stop packets
 	void EmuStart();
 	void EmuStop();
+	void EmuResume();
+	void EmuPause();
 
 	// connecting and disconnecting from physical devices
 	// (using address inserted by FindWiimotes)
@@ -73,6 +61,8 @@ public:
 	bool Prepare(int index);
 
 	void DisableDataReporting();
+	void EnableDataReporting(u8 mode);
+	void SetChannel(u16 channel);
 	
 	void QueueReport(u8 rpt_id, const void* data, unsigned int size);
 
@@ -99,17 +89,20 @@ public:
 #endif
 
 protected:
-	Report	m_last_data_report;
+	Report m_last_input_report;
 	u16	m_channel;
 
 private:
 	void ClearReadQueue();
+	void WriteReport(Report rpt);
 	
 	int IORead(u8* buf);
 	int IOWrite(u8 const* buf, int len);
 
 	void ThreadFunc();
 
+	bool m_rumble_state;
+	
 	bool				m_run_thread;
 	std::thread			m_wiimote_thread;
 	
@@ -128,11 +121,12 @@ public:
 	bool IsReady() const;
 	
 	void WantWiimotes(bool do_want);
+	void WantBB(bool do_want);
 
 	void StartScanning();
 	void StopScanning();
 
-	std::vector<Wiimote*> FindWiimotes();
+	void FindWiimotes(std::vector<Wiimote*>&, Wiimote*&);
 
 	// function called when not looking for more wiimotes
 	void Update();
@@ -144,10 +138,10 @@ private:
 
 	volatile bool m_run_thread;
 	volatile bool m_want_wiimotes;
+	volatile bool m_want_bb;
 
 #if defined(_WIN32)
-	
-
+	void CheckDeviceType(std::basic_string<TCHAR> &devicepath, bool &real_wiimote, bool &is_bb);
 #elif defined(__linux__) && HAVE_BLUEZ
 	int device_id;
 	int device_sock;
@@ -156,7 +150,7 @@ private:
 
 extern std::recursive_mutex g_refresh_lock;
 extern WiimoteScanner g_wiimote_scanner;
-extern Wiimote *g_wiimotes[4];
+extern Wiimote *g_wiimotes[MAX_BBMOTES];
 
 void InterruptChannel(int _WiimoteNumber, u16 _channelID, const void* _pData, u32 _Size);
 void ControlChannel(int _WiimoteNumber, u16 _channelID, const void* _pData, u32 _Size);
@@ -169,6 +163,7 @@ int FindWiimotes(Wiimote** wm, int max_wiimotes);
 void ChangeWiimoteSource(unsigned int index, int source);
 
 bool IsValidBluetoothName(const std::string& name);
+bool IsBalanceBoardName(const std::string& name);
 
 }; // WiimoteReal
 
