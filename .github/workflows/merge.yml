@@ -1,0 +1,176 @@
+name: Merge
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+    - name: Merge
+      shell: bash
+      run: |
+        # Git config
+        git config core.autocrlf false
+        git config core.ignorecase false
+        git config core.fscache true
+        git config diff.renameLimit 0
+        git config status.renameLimit 0
+        git config merge.renameLimit 0
+        git config http.postBuffer 1048576000
+        git config pack.threads 1
+        git config index.threads 0
+        
+        # Fetch latest commits
+        git remote add dolphin-emu https://github.com/dolphin-emu/dolphin.git
+        git fetch --all
+        git reset --hard --recurse-submodule dolphin-emu/master
+        git clean -dffx
+        git submodule foreach git clean -dffx
+        
+        # Who made the last commit and when?
+        export latest_committer_date="$(git log -1 --format=%cD)"
+        export latest_author_date="$(git log -1 --format=%aD)"
+        export latest_commit="$(git log -1 --format=%H)"
+        
+        # Lets create our latest change in history first
+        git reset --hard 5f0c892ed0c280eb7fd56e9e2789b41b4ae8ee5a
+        git clean -dffx
+        export later_committer_date="$(git log -1 --format=%cD)"
+        export later_author_date="$(git log -1 --format=%aD)"
+        export later_author_email="$(git log -1 --format=%ae)"
+        export later_author_name="$(git log -1 --format=%an)"
+        export later_committer_email="$(git log -1 --format=%ce)"
+        export later_committer_name="$(git log -1 --format=%cn)"
+        export GIT_COMMITTER_DATE="$later_committer_date"
+        export GIT_AUTHOR_DATE="$later_author_date"
+        git -c user.name="$later_author_name" -c user.email="$later_author_email" revert --no-edit 5f0c892ed0c280eb7fd56e9e2789b41b4ae8ee5a
+        git -c user.name="$later_committer_name" -c user.email="$later_committer_email" commit --amend -m'Revert "Remove outdated documentation files"
+        
+        This reverts commit 5f0c892ed0c280eb7fd56e9e2789b41b4ae8ee5a.'
+        export later_revert_commit="$(git log -1 --format=%H)"
+        
+        # Create our second and earliest change in history
+        git reset --hard e81dd53b7ebc5e6dc12c714f749ab5ed457624df
+        git clean -dffx
+        export earlier_committer_date="$(git log -1 --format=%cD)"
+        export earlier_author_date="$(git log -1 --format=%aD)"
+        export earlier_author_email="$(git log -1 --format=%ae)"
+        export earlier_author_name="$(git log -1 --format=%an)"
+        export earlier_committer_email="$(git log -1 --format=%ce)"
+        export earlier_committer_name="$(git log -1 --format=%cn)"
+        export GIT_COMMITTER_DATE="$earlier_committer_date"
+        export GIT_AUTHOR_DATE="$earlier_author_date"
+        git -c user.name="$earlier_author_name" -c user.email="$earlier_author_email" revert --no-edit e81dd53b7ebc5e6dc12c714f749ab5ed457624df
+        git -c user.name="$earlier_committer_name" -c user.email="$earlier_committer_email" commit --amend -m'Revert "Remove an obsolete documentation file"
+        
+        This reverts commit e81dd53b7ebc5e6dc12c714f749ab5ed457624df.'
+        export earlier_revert_commit="$(git log -1 --format=%H)"
+        
+        # Move to the earliest point in history before we change it
+        git reset --hard 0c86634101fcb0de847c9b9d381486ed54383cc2
+        git clean -dffx
+        
+        # Merge our second and earliest change in history
+        git -c user.name="$earlier_committer_name" -c user.email="$earlier_committer_email" merge --no-ff --no-edit $earlier_revert_commit
+        if [ "$(git log -1 --format=%H)" = "0c86634101fcb0de847c9b9d381486ed54383cc2" ]; then
+            exit 1
+        fi
+        git -c user.name="$earlier_committer_name" -c user.email="$earlier_committer_email" commit --amend -m"Merge branch 'master' of https://code.google.com/p/dolphin-emu"
+        
+        # Merge up until our later change in history
+        export up_until_later_committer_date="$(git log -1 --format=%cD ca23318089a9bdcd9a7af93667dc30b1c73dc0e8)"
+        export up_until_later_author_date="$(git log -1 --format=%aD ca23318089a9bdcd9a7af93667dc30b1c73dc0e8)"
+        export up_until_later_author_email="$(git log -1 --format=%ae ca23318089a9bdcd9a7af93667dc30b1c73dc0e8)"
+        export up_until_later_author_name="$(git log -1 --format=%an ca23318089a9bdcd9a7af93667dc30b1c73dc0e8)"
+        export up_until_later_committer_email="$(git log -1 --format=%ce ca23318089a9bdcd9a7af93667dc30b1c73dc0e8)"
+        export up_until_later_committer_name="$(git log -1 --format=%cn ca23318089a9bdcd9a7af93667dc30b1c73dc0e8)"
+        export GIT_COMMITTER_DATE="$up_until_later_committer_date"
+        export GIT_AUTHOR_DATE="$up_until_later_author_date"
+        export current_point_in_history="$(git log -1 --format=%H)"
+        git -c user.name="$up_until_later_committer_name" -c user.email="$up_until_later_committer_email" merge --no-ff --no-edit ca23318089a9bdcd9a7af93667dc30b1c73dc0e8
+        if [ "$(git log -1 --format=%H)" = "$current_point_in_history" ]; then
+            exit 1
+        fi
+        git -c user.name="$up_until_later_committer_name" -c user.email="$up_until_later_committer_email" commit --amend -m"Merge branch 'master' of https://code.google.com/p/dolphin-emu"
+        
+        # Merge our later change in history
+        export GIT_COMMITTER_DATE="$later_committer_date"
+        export GIT_AUTHOR_DATE="$later_author_date"
+        export current_point_in_history="$(git log -1 --format=%H)"
+        git -c user.name="$later_committer_name" -c user.email="$later_committer_email" merge --no-ff --no-edit $later_revert_commit
+        if [ "$(git log -1 --format=%H)" = "$current_point_in_history" ]; then
+            exit 1
+        fi
+        git -c user.name="$later_committer_name" -c user.email="$later_committer_email" commit --amend -m"Merge branch 'master' of https://code.google.com/p/dolphin-emu"
+        export changed_files_merge="$(git log -1 --format=%H)"
+        
+        # Move back to the earliest point in history before we change it again
+        git reset --hard 0c86634101fcb0de847c9b9d381486ed54383cc2
+        git clean -dffx
+        
+        # Merge the changed history
+        git -c user.name="$up_until_later_committer_name" -c user.email="$up_until_later_committer_email" merge --no-ff --no-edit $changed_files_merge
+        if [ "$(git log -1 --format=%H)" = "0c86634101fcb0de847c9b9d381486ed54383cc2" ]; then
+            exit 1
+        fi
+        git -c user.name="$up_until_later_committer_name" -c user.email="$up_until_later_committer_email" commit --amend -m"Merge branch 'master' of https://code.google.com/p/dolphin-emu"
+        # Save the resulting merge
+        export changed_history_merge="$(git log -1 --format=%H)"
+        
+        # Move back to the earliest point in history before we change it again
+        git reset --hard 0c86634101fcb0de847c9b9d381486ed54383cc2
+        git clean -dffx
+        
+        # Merge the changed history merge
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" merge --no-ff --no-edit $changed_history_merge
+        if [ "$(git log -1 --format=%H)" = "0c86634101fcb0de847c9b9d381486ed54383cc2" ]; then
+            exit 1
+        fi
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" commit --amend -m"Merge branch 'master' of https://github.com/dolphin-emu/dolphin"
+        # Save the resulting merge
+        export new_history_merge="$(git log -1 --format=%H)"
+        
+        # Merge 5.0
+        export major_version_committer_date="$(git log -1 --format=%cD ac267a29405ae768037a8774b84b805a4180d1af)"
+        export major_version_author_date="$(git log -1 --format=%aD ac267a29405ae768037a8774b84b805a4180d1af)"
+        export GIT_COMMITTER_DATE="$major_version_committer_date"
+        export GIT_AUTHOR_DATE="$major_version_author_date"
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" merge --no-ff --no-edit ac267a29405ae768037a8774b84b805a4180d1af
+        if [ "$(git log -1 --format=%H)" = $new_history_merge ]; then
+            exit 1
+        fi
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" commit --amend -m"Merge branch 'master' of https://github.com/dolphin-emu/dolphin"
+        # Save the resulting merge
+        export new_history_merge="$(git log -1 --format=%H)"
+        
+        # GitHub Actions
+        git checkout origin/master -- .github/workflows/merge.yml
+        git add .github/workflows/merge.yml
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" commit -m"GitHub Actions"
+        
+        # Merge the rest of the history so we're up-to-date
+        export GIT_COMMITTER_DATE="$latest_committer_date"
+        export GIT_AUTHOR_DATE="$latest_author_date"
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" merge --no-ff --no-edit $latest_commit
+        if [ "$(git log -1 --format=%H)" = $new_history_merge ]; then
+            exit 1
+        fi
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" commit --amend -m"Merge branch 'master' of https://github.com/dolphin-emu/dolphin"
+        
+        # Update WiiTDBs
+        bash Tools/update-wiitdb.sh
+        
+        # Remove timestamps
+        sed -i '1d' Data/Sys/wiitdb-*.txt
+        
+        # Commit WiiTDBs
+        git add Data/Sys/wiitdb-*.txt
+        git -c user.name="8" -c user.email="ElGHT@users.noreply.github.com" commit -m"Update WiiTDBs"
+    - uses: ad-m/github-push-action@master
+      with:
+        branch: "refs/heads/master"
+        force: true
+        github_token: ${{ secrets.GITHUB_TOKEN }}
