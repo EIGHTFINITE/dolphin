@@ -2,20 +2,28 @@
 // Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include "Core/HW/DSPHLE/UCodes/INIT.h"
+
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
-#include "Core/HW/DSPHLE/UCodes/INIT.h"
+#include "Core/HW/DSPHLE/DSPHLE.h"
+#include "Core/HW/DSPHLE/MailHandler.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
 
-INITUCode::INITUCode(DSPHLE *dsphle, u32 crc)
-	: UCodeInterface(dsphle, crc)
+namespace DSP::HLE
 {
-	DEBUG_LOG(DSPHLE, "INITUCode - initialized");
-	m_mail_handler.PushMail(0x80544348);
+INITUCode::INITUCode(DSPHLE* dsphle, u32 crc) : UCodeInterface(dsphle, crc)
+{
+  INFO_LOG_FMT(DSPHLE, "INITUCode - initialized");
 }
 
 INITUCode::~INITUCode()
 {
+}
+
+void INITUCode::Initialize()
+{
+  m_mail_handler.PushMail(0x80544348);
 }
 
 void INITUCode::Init()
@@ -29,5 +37,4 @@ void INITUCode::Update()
 void INITUCode::HandleMail(u32 mail)
 {
 }
-
-
+}  // namespace DSP::HLE

@@ -1,3 +1,26 @@
+Legal GC/WII DSP IROM replacement (v0.3.1)
+-------------------------------------------------------
+
+- irom: When running from the ROM entrypoint, skip the bootucode_ax branch
+  of the bootucode procedure. Since the ROM doesn't set any of the AX
+  registers, it could cause bad DMA transfers and crashes.
+
+ligfx
+10/aug/2017
+
+Legal GC/WII DSP IROM replacement (v0.3)
+-------------------------------------------------------
+
+- coef: Explicitly set 23 different values that are used by GBA UCode, and
+  tweaked overall parameters to more closely match those 23 values.
+- irom: Moved a few functions to their proper places, updated BootUCode to
+  configure DMA transfers using AX registers as well as IX registers (the GBA
+  UCode uses this to do two sequential transfers in one call), and added
+  partial functions used by GBA UCode.
+
+ligfx
+2/june/2017
+
 Legal GC/WII DSP IROM replacement (v0.2.1)
 -------------------------------------------------------
 

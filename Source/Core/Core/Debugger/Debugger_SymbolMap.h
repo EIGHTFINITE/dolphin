@@ -5,6 +5,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -12,18 +13,17 @@
 
 namespace Dolphin_Debugger
 {
-
 struct CallstackEntry
 {
-	std::string Name;
-	u32 vAddress;
+  std::string Name;
+  u32 vAddress;
 };
 
-bool GetCallstack(std::vector<CallstackEntry> &output);
+bool GetCallstack(std::vector<CallstackEntry>& output);
 void PrintCallstack();
-void PrintCallstack(LogTypes::LOG_TYPE type, LogTypes::LOG_LEVELS level);
-void PrintDataBuffer(LogTypes::LOG_TYPE type, const u8* data, size_t size, const std::string& title);
+void PrintCallstack(Common::Log::LOG_TYPE type, Common::Log::LOG_LEVELS level);
+void PrintDataBuffer(Common::Log::LOG_TYPE type, const u8* data, size_t size,
+                     std::string_view title);
 void AddAutoBreakpoints();
 
-
-} // end of namespace Debugger
+}  // namespace Dolphin_Debugger

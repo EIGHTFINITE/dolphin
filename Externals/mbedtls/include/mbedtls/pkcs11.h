@@ -4,7 +4,8 @@
  * \brief Wrapper for PKCS#11 library libpkcs11-helper
  *
  * \author Adriaan de Jong <dejong@fox-it.com>
- *
+ */
+/*
  *  Copyright (C) 2006-2015, ARM Limited, All Rights Reserved
  *  SPDX-License-Identifier: Apache-2.0
  *
@@ -37,7 +38,8 @@
 
 #include <pkcs11-helper-1.0/pkcs11h-certificate.h>
 
-#if ( defined(__ARMCC_VERSION) || defined(_MSC_VER) ) && !defined(inline)
+#if ( defined(__ARMCC_VERSION) || defined(_MSC_VER) ) && \
+    !defined(inline) && !defined(__cplusplus)
 #define inline __inline
 #endif
 
@@ -48,13 +50,14 @@ extern "C" {
 /**
  * Context for PKCS #11 private keys.
  */
-typedef struct {
+typedef struct mbedtls_pkcs11_context
+{
         pkcs11h_certificate_t pkcs11h_cert;
         int len;
 } mbedtls_pkcs11_context;
 
 /**
- * Initialize a mbetls_pkcs11_context.
+ * Initialize a mbedtls_pkcs11_context.
  * (Just making memory references valid.)
  */
 void mbedtls_pkcs11_init( mbedtls_pkcs11_context *ctx );

@@ -1,102 +1,303 @@
-set(SRCS Analytics.cpp
-         BreakPoints.cpp
-         CDUtils.cpp
-         ColorUtil.cpp
-         ENetUtil.cpp
-         FileSearch.cpp
-         FileUtil.cpp
-         GekkoDisassembler.cpp
-         Hash.cpp
-         IniFile.cpp
-         JitRegister.cpp
-         MathUtil.cpp
-         MemArena.cpp
-         MemoryUtil.cpp
-         Misc.cpp
-         MsgHandler.cpp
-         NandPaths.cpp
-         Network.cpp
-         PcapFile.cpp
-         PerformanceCounter.cpp
-         Profiler.cpp
-         SettingsHandler.cpp
-         SDCardUtil.cpp
-         StringUtil.cpp
-         SymbolDB.cpp
-         SysConf.cpp
-         Thread.cpp
-         Timer.cpp
-         TraversalClient.cpp
-         Version.cpp
-         x64ABI.cpp
-         x64Analyzer.cpp
-         x64Emitter.cpp
-         Crypto/bn.cpp
-         Crypto/ec.cpp
-         Logging/LogManager.cpp)
+add_library(common
+  Analytics.cpp
+  Analytics.h
+  Assert.h
+  Atomic.h
+  BitField.h
+  BitSet.h
+  BitUtils.h
+  BlockingLoop.h
+  CDUtils.cpp
+  CDUtils.h
+  ChunkFile.h
+  CodeBlock.h
+  ColorUtil.cpp
+  ColorUtil.h
+  Common.h
+  CommonFuncs.cpp
+  CommonFuncs.h
+  CommonPaths.h
+  CommonTypes.h
+  Config/Config.cpp
+  Config/Config.h
+  Config/ConfigInfo.cpp
+  Config/ConfigInfo.h
+  Config/Enums.h
+  Config/Layer.cpp
+  Config/Layer.h
+  CPUDetect.h
+  Crypto/AES.cpp
+  Crypto/AES.h
+  Crypto/bn.cpp
+  Crypto/bn.h
+  Crypto/ec.cpp
+  Crypto/ec.h
+  Debug/MemoryPatches.cpp
+  Debug/MemoryPatches.h
+  Debug/Threads.h
+  Debug/Watches.cpp
+  Debug/Watches.h
+  DebugInterface.h
+  DynamicLibrary.cpp
+  DynamicLibrary.h
+  ENetUtil.cpp
+  ENetUtil.h
+  EnumFormatter.h
+  Event.h
+  FileSearch.cpp
+  FileSearch.h
+  FileUtil.cpp
+  FileUtil.h
+  FixedSizeQueue.h
+  Flag.h
+  FloatUtils.cpp
+  FloatUtils.h
+  FormatUtil.h
+  FPURoundMode.h
+  GekkoDisassembler.cpp
+  GekkoDisassembler.h
+  Hash.cpp
+  Hash.h
+  HttpRequest.cpp
+  HttpRequest.h
+  Image.cpp
+  Image.h
+  IniFile.cpp
+  IniFile.h
+  Inline.h
+  IOFile.cpp
+  IOFile.h
+  JitRegister.cpp
+  JitRegister.h
+  Lazy.h
+  LinearDiskCache.h
+  Logging/ConsoleListener.h
+  Logging/Log.h
+  Logging/LogManager.cpp
+  Logging/LogManager.h
+  MathUtil.cpp
+  MathUtil.h
+  Matrix.cpp
+  Matrix.h
+  MD5.cpp
+  MD5.h
+  MemArena.cpp
+  MemArena.h
+  MemoryUtil.cpp
+  MemoryUtil.h
+  MinizipUtil.h
+  MsgHandler.cpp
+  MsgHandler.h
+  NandPaths.cpp
+  NandPaths.h
+  Network.cpp
+  Network.h
+  PcapFile.cpp
+  PcapFile.h
+  PerformanceCounter.cpp
+  PerformanceCounter.h
+  Profiler.cpp
+  Profiler.h
+  QoSSession.cpp
+  QoSSession.h
+  Random.cpp
+  Random.h
+  Result.h
+  ScopeGuard.h
+  SDCardUtil.cpp
+  SDCardUtil.h
+  Semaphore.h
+  SettingsHandler.cpp
+  SettingsHandler.h
+  SFMLHelper.cpp
+  SFMLHelper.h
+  SocketContext.cpp
+  SocketContext.h
+  SPSCQueue.h
+  StringUtil.cpp
+  StringUtil.h
+  SymbolDB.cpp
+  SymbolDB.h
+  Thread.cpp
+  Thread.h
+  Timer.cpp
+  Timer.h
+  TraversalClient.cpp
+  TraversalClient.h
+  TraversalProto.h
+  UPnP.cpp
+  UPnP.h
+  VariantUtil.h
+  Version.cpp
+  Version.h
+  WindowSystemInfo.h
+  WorkQueueThread.h
+)
+
+target_link_libraries(common
+PUBLIC
+  ${CMAKE_THREAD_LIBS_INIT}
+  enet
+  fmt::fmt
+  ${MBEDTLS_LIBRARIES}
+  minizip
+
+PRIVATE
+  ${CURL_LIBRARIES}
+  ${ICONV_LIBRARIES}
+  png
+  ${VTUNE_LIBRARIES}
+)
+
+if (APPLE)
+  target_link_libraries(common
+  PRIVATE
+    ${APPKIT_LIBRARY}
+    ${COREFOUNDATION_LIBRARY}
+    ${IOK_LIBRARY}
+  )
+elseif(WIN32)
+  target_link_libraries(common
+  PRIVATE
+    kernel32.lib
+    shlwapi.lib
+    winmm.lib
+  )
+  if (_M_X86_64)
+	  target_link_libraries(common PRIVATE opengl32.lib)
+  endif()
+elseif (ANDROID)
+  target_link_libraries(common
+  PRIVATE
+    androidcommon
+  )
+elseif(HAIKU)
+  target_link_libraries(common PRIVATE be GL)
+endif()
 
 if(ANDROID)
-	set(SRCS ${SRCS}
-	         Logging/ConsoleListenerDroid.cpp)
+  target_sources(common PRIVATE
+    AndroidAnalytics.cpp
+    AndroidAnalytics.h
+    Logging/ConsoleListenerDroid.cpp
+  )
+elseif(WIN32)
+  target_sources(common PRIVATE
+    LdrWatcher.cpp
+    LdrWatcher.h
+    Logging/ConsoleListenerWin.cpp
+  )
 else()
-	set(SRCS ${SRCS}
-	         Logging/ConsoleListenerNix.cpp)
+  target_sources(common PRIVATE
+    Logging/ConsoleListenerNix.cpp
+  )
 endif()
 
-list(APPEND LIBS enet ${CURL_LIBRARIES})
 if(_M_ARM_64)
-	set(SRCS ${SRCS}
-	         Arm64Emitter.cpp
-	         ArmCPUDetect.cpp
-	         GenericFPURoundMode.cpp)
+  target_sources(common PRIVATE
+    Arm64Emitter.cpp
+    Arm64Emitter.h
+    ArmCommon.h
+    ArmCPUDetect.cpp
+    GenericFPURoundMode.cpp
+  )
 else()
-	if(_M_X86) #X86
-		set(SRCS ${SRCS}
-		         x64FPURoundMode.cpp
-		         x64CPUDetect.cpp)
-	else() # Generic
-		set(SRCS ${SRCS}
-		         GenericFPURoundMode.cpp
-		         GenericCPUDetect.cpp)
-	endif()
+  if(_M_X86) #X86
+    target_sources(common PRIVATE
+      x64ABI.cpp
+      x64ABI.h
+      x64Emitter.cpp
+      x64Emitter.h
+      x64FPURoundMode.cpp
+      x64CPUDetect.cpp
+      x64Reg.h
+    )
+  else() # Generic
+    target_sources(common PRIVATE
+      GenericFPURoundMode.cpp
+      GenericCPUDetect.cpp
+    )
+  endif()
 endif()
-
-list(APPEND LIBS "${CMAKE_THREAD_LIBS_INIT}" ${VTUNE_LIBRARIES})
 
 # OpenGL Interface
-set(SRCS ${SRCS}
-	GL/GLUtil.cpp
-	GL/GLExtensions/GLExtensions.cpp
-	GL/GLInterface/GLInterface.cpp)
+target_sources(common PRIVATE
+  GL/GLContext.cpp
+  GL/GLContext.h
+  GL/GLUtil.cpp
+  GL/GLUtil.h
+  GL/GLExtensions/GLExtensions.cpp
+  GL/GLExtensions/GLExtensions.h
+)
 
-if(USE_EGL)
-    set(SRCS ${SRCS} GL/GLInterface/EGL.cpp)
-    if(ANDROID)
-        set(SRCS ${SRCS} GL/GLInterface/EGLAndroid.cpp)
-    elseif(USE_X11)
-        set(SRCS ${SRCS} GL/GLInterface/EGLX11.cpp)
-    endif()
-	set(LIBS ${LIBS} EGL)
+if(ENABLE_EGL AND EGL_FOUND)
+  target_sources(common PRIVATE
+    GL/GLInterface/EGL.cpp
+    GL/GLInterface/EGL.h
+  )
+  if(ANDROID)
+    target_sources(common PRIVATE
+      GL/GLInterface/EGLAndroid.cpp
+      GL/GLInterface/EGLAndroid.h
+    )
+  elseif(ENABLE_X11 AND X11_FOUND)
+    target_sources(common PRIVATE
+      GL/GLInterface/EGLX11.cpp
+      GL/GLInterface/EGLX11.h
+    )
+  endif()
+  target_include_directories(common PRIVATE ${EGL_INCLUDE_DIRS})
+  target_link_libraries(common PUBLIC ${EGL_LIBRARIES})
 endif()
 
 if(WIN32)
-    set(SRCS ${SRCS} GL/GLInterface/WGL.cpp)
+  target_sources(common PRIVATE
+    CompatPatches.cpp
+    GL/GLInterface/WGL.cpp
+    GL/GLInterface/WGL.h
+  )
 elseif(APPLE)
-    set(SRCS ${SRCS} GL/GLInterface/AGL.cpp)
-elseif(USE_X11)
-    if (NOT USE_EGL)
-        set(SRCS ${SRCS} GL/GLInterface/GLX.cpp)
-        # GLX has a hard dependency on libGL.
-        # Make sure to link to it if using GLX.
-        set(LIBS ${LIBS} ${OPENGL_LIBRARIES})
-    endif()
-    set(SRCS ${SRCS} GL/GLInterface/X11_Util.cpp)
-    set(LIBS ${LIBS} ${XRANDR_LIBRARIES})
+  target_sources(common PRIVATE
+    GL/GLInterface/AGL.h
+    GL/GLInterface/AGL.mm
+  )
+elseif(HAIKU)
+  target_sources(common PRIVATE
+    GL/GLInterface/BGL.h
+    GL/GLInterface/BGL.cpp
+  )
+elseif(ENABLE_X11 AND X11_FOUND)
+  target_sources(common PRIVATE
+    GL/GLX11Window.cpp
+    GL/GLX11Window.h
+    GL/GLInterface/GLX.cpp
+    GL/GLInterface/GLX.h
+  )
+
+  # GLX has a hard dependency on libGL.
+  # Make sure to link to it if using GLX.
+  target_link_libraries(common PUBLIC ${OPENGL_LIBRARIES})
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME MATCHES FreeBSD)
-	set(LIBS ${LIBS} dl)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(common PUBLIC dl rt)
 endif()
 
-add_dolphin_library(common "${SRCS}" "${LIBS}")
-add_executable(traversal_server TraversalServer.cpp)
+if(USE_UPNP)
+  target_link_libraries(common PRIVATE Miniupnpc::miniupnpc)
+endif()
+
+if(OPROFILE_FOUND)
+  target_link_libraries(common PRIVATE OProfile::OProfile)
+endif()
+
+if(UNIX)
+  # Posix networking code needs to be fixed for Windows
+  add_executable(traversal_server TraversalServer.cpp)
+  target_link_libraries(traversal_server PRIVATE common)
+  if(SYSTEMD_FOUND)
+    target_link_libraries(traversal_server PRIVATE ${SYSTEMD_LIBRARIES})
+  endif()
+elseif(WIN32)
+  target_link_libraries(common PRIVATE "-INCLUDE:enableCompatPatches")
+endif()

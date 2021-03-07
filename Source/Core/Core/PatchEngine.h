@@ -13,59 +13,61 @@ class IniFile;
 
 namespace PatchEngine
 {
-
-enum PatchType
+enum class PatchType
 {
-	PATCH_8BIT,
-	PATCH_16BIT,
-	PATCH_32BIT,
+  Patch8Bit,
+  Patch16Bit,
+  Patch32Bit,
 };
-
-extern const char *PatchTypeStrings[];
 
 struct PatchEntry
 {
-	PatchEntry() {}
-	PatchEntry(PatchType _t, u32 _addr, u32 _value) : type(_t), address(_addr), value(_value) {}
-	PatchType type;
-	u32 address;
-	u32 value;
+  PatchEntry() = default;
+  PatchEntry(PatchType t, u32 addr, u32 value_) : type(t), address(addr), value(value_) {}
+  PatchType type = PatchType::Patch8Bit;
+  u32 address = 0;
+  u32 value = 0;
+  u32 comparand = 0;
+  bool conditional = false;
 };
 
 struct Patch
 {
-	std::string name;
-	std::vector<PatchEntry> entries;
-	bool active;
-	bool user_defined; // False if this code is shipped with Dolphin.
+  std::string name;
+  std::vector<PatchEntry> entries;
+  bool enabled = false;
+  bool default_enabled = false;
+  bool user_defined = false;  // False if this code is shipped with Dolphin.
 };
 
+const char* PatchTypeAsString(PatchType type);
+
 int GetSpeedhackCycles(const u32 addr);
-void LoadPatchSection(const std::string& section, std::vector<Patch> &patches,
-                      IniFile &globalIni, IniFile &localIni);
+void LoadPatchSection(const std::string& section, std::vector<Patch>& patches, IniFile& globalIni,
+                      IniFile& localIni);
 void LoadPatches();
-void ApplyFramePatches();
+bool ApplyFramePatches();
 void Shutdown();
+void Reload();
 
 inline int GetPatchTypeCharLength(PatchType type)
 {
-	int size = 8;
-	switch (type)
-	{
-	case PatchEngine::PATCH_8BIT:
-		size = 2;
-		break;
+  int size = 8;
+  switch (type)
+  {
+  case PatchType::Patch8Bit:
+    size = 2;
+    break;
 
-	case PatchEngine::PATCH_16BIT:
-		size = 4;
-		break;
+  case PatchType::Patch16Bit:
+    size = 4;
+    break;
 
-	case PatchEngine::PATCH_32BIT:
-		size = 8;
-		break;
-	}
-	return size;
+  case PatchType::Patch32Bit:
+    size = 8;
+    break;
+  }
+  return size;
 }
 
-}  // namespace
-extern std::vector<PatchEngine::Patch> onFrame;
+}  // namespace PatchEngine

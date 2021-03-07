@@ -5,100 +5,77 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "Common/CommonTypes.h"
+#include "Common/WindowSystemInfo.h"
 #include "VideoCommon/PerfQueryBase.h"
 
-namespace MMIO { class Mapping; }
+namespace MMIO
+{
+class Mapping;
+}
 class PointerWrap;
 
-enum FieldType
+enum class FieldType
 {
-	FIELD_ODD = 0,
-	FIELD_EVEN = 1,
+  Odd,
+  Even,
 };
 
-enum EFBAccessType
+enum class EFBAccessType
 {
-	PEEK_Z = 0,
-	POKE_Z,
-	PEEK_COLOR,
-	POKE_COLOR
-};
-
-struct SCPFifoStruct
-{
-	// fifo registers
-	volatile u32 CPBase;
-	volatile u32 CPEnd;
-	u32 CPHiWatermark;
-	u32 CPLoWatermark;
-	volatile u32 CPReadWriteDistance;
-	volatile u32 CPWritePointer;
-	volatile u32 CPReadPointer;
-	volatile u32 CPBreakpoint;
-	volatile u32 SafeCPReadPointer;
-	// Super Monkey Ball Adventure require this.
-	// Because the read&check-PEToken-loop stays in its JITed block I suppose.
-	// So no possiblity to ack the Token irq by the scheduler until some sort of PPC watchdog do its mess.
-	volatile u16 PEToken;
-
-	volatile u32 bFF_GPLinkEnable;
-	volatile u32 bFF_GPReadEnable;
-	volatile u32 bFF_BPEnable;
-	volatile u32 bFF_BPInt;
-	volatile u32 bFF_Breakpoint;
-
-	volatile u32 bFF_LoWatermarkInt;
-	volatile u32 bFF_HiWatermarkInt;
-
-	volatile u32 bFF_LoWatermark;
-	volatile u32 bFF_HiWatermark;
+  PeekZ,
+  PokeZ,
+  PeekColor,
+  PokeColor
 };
 
 class VideoBackendBase
 {
 public:
-	virtual ~VideoBackendBase() {}
+  virtual ~VideoBackendBase() {}
+  virtual bool Initialize(const WindowSystemInfo& wsi) = 0;
+  virtual void Shutdown() = 0;
 
-	virtual unsigned int PeekMessages() = 0;
+  virtual std::string GetName() const = 0;
+  virtual std::string GetDisplayName() const { return GetName(); }
+  virtual void InitBackendInfo() = 0;
+  virtual std::optional<std::string> GetWarningMessage() const { return {}; }
 
-	virtual bool Initialize(void* window_handle) = 0;
-	virtual void Shutdown() = 0;
+  // Prepares a native window for rendering. This is called on the main thread, or the
+  // thread which owns the window.
+  virtual void PrepareWindow(WindowSystemInfo& wsi) {}
 
-	virtual std::string GetName() const = 0;
-	virtual std::string GetDisplayName() const { return GetName(); }
+  static std::string BadShaderFilename(const char* shader_stage, int counter);
 
-	virtual void ShowConfig(void*) = 0;
+  void Video_ExitLoop();
 
-	virtual void Video_Prepare() = 0;
-	void Video_ExitLoop();
-	virtual void Video_Cleanup() = 0; // called from gl/d3d thread
+  void Video_BeginField(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks);
 
-	void Video_BeginField(u32, u32, u32, u32);
-	void Video_EndField();
+  u32 Video_AccessEFB(EFBAccessType type, u32 x, u32 y, u32 data);
+  u32 Video_GetQueryResult(PerfQueryType type);
+  u16 Video_GetBoundingBox(int index);
 
-	u32 Video_AccessEFB(EFBAccessType, u32, u32, u32);
-	u32 Video_GetQueryResult(PerfQueryType type);
-	u16 Video_GetBoundingBox(int index);
+  static std::string GetDefaultBackendName();
+  static const std::vector<std::unique_ptr<VideoBackendBase>>& GetAvailableBackends();
+  static void ActivateBackend(const std::string& name);
 
-	static void PopulateList();
-	static void ClearList();
-	static void ActivateBackend(const std::string& name);
+  // Fills the backend_info fields with the capabilities of the selected backend/device.
+  static void PopulateBackendInfo();
+  // Called by the UI thread when the graphics config is opened.
+  static void PopulateBackendInfoFromUI();
 
-	// the implementation needs not do synchronization logic, because calls to it are surrounded by PauseAndLock now
-	void DoState(PointerWrap &p);
-
-	void CheckInvalidState();
+  // Wrapper function which pushes the event to the GPU thread.
+  void DoState(PointerWrap& p);
 
 protected:
-	void InitializeShared();
+  void InitializeShared();
+  void ShutdownShared();
 
-	bool m_initialized = false;
-	bool m_invalid = false;
+  bool m_initialized = false;
 };
 
-extern std::vector<std::unique_ptr<VideoBackendBase>> g_available_video_backends;
 extern VideoBackendBase* g_video_backend;

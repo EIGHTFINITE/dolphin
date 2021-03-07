@@ -14,32 +14,32 @@
 #include "Core/Debugger/PPCDebugInterface.h"
 
 // This has functionality overlapping Debugger_Symbolmap. Should merge that stuff in here later.
-class PPCSymbolDB : public SymbolDB
+class PPCSymbolDB : public Common::SymbolDB
 {
-private:
-	DebugInterface* debugger;
-
 public:
-	typedef void (*functionGetterCallback)(Symbol *f);
+  PPCSymbolDB();
+  ~PPCSymbolDB() override;
 
-	PPCSymbolDB();
-	~PPCSymbolDB();
+  Common::Symbol* AddFunction(u32 start_addr) override;
+  void AddKnownSymbol(u32 startAddr, u32 size, const std::string& name,
+                      Common::Symbol::Type type = Common::Symbol::Type::Function);
 
-	Symbol *AddFunction(u32 startAddr) override;
-	void AddKnownSymbol(u32 startAddr, u32 size, const std::string& name, int type = Symbol::SYMBOL_FUNCTION);
+  Common::Symbol* GetSymbolFromAddr(u32 addr) override;
 
-	Symbol *GetSymbolFromAddr(u32 addr) override;
+  std::string GetDescription(u32 addr);
 
-	const std::string GetDescription(u32 addr);
+  void FillInCallers();
 
-	void FillInCallers();
+  bool LoadMap(const std::string& filename, bool bad = false);
+  bool SaveSymbolMap(const std::string& filename) const;
+  bool SaveCodeMap(const std::string& filename) const;
 
-	bool LoadMap(const std::string& filename, bool bad = false);
-	bool SaveMap(const std::string& filename, bool WithCodes = false) const;
+  void PrintCalls(u32 funcAddr) const;
+  void PrintCallers(u32 funcAddr) const;
+  void LogFunctionCall(u32 addr);
 
-	void PrintCalls(u32 funcAddr) const;
-	void PrintCallers(u32 funcAddr) const;
-	void LogFunctionCall(u32 addr);
+private:
+  Common::DebugInterface* debugger;
 };
 
 extern PPCSymbolDB g_symbolDB;

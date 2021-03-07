@@ -2,64 +2,69 @@
 // Licensed under GPLv2+
 // Refer to the license.txt file included.
 
-#include "Common/StringUtil.h"
-
 #include "InputCommon/ControllerInterface/DInput/DInput.h"
 
+#include "Common/Logging/Log.h"
+#include "Common/StringUtil.h"
+
+#include "InputCommon/ControllerInterface/ControllerInterface.h"
 #include "InputCommon/ControllerInterface/DInput/DInputJoystick.h"
 #include "InputCommon/ControllerInterface/DInput/DInputKeyboardMouse.h"
 
 #pragma comment(lib, "Dinput8.lib")
 #pragma comment(lib, "dxguid.lib")
 
-namespace ciface
+namespace ciface::DInput
 {
-namespace DInput
-{
-
 BOOL CALLBACK DIEnumDeviceObjectsCallback(LPCDIDEVICEOBJECTINSTANCE lpddoi, LPVOID pvRef)
 {
-	((std::list<DIDEVICEOBJECTINSTANCE>*)pvRef)->push_back(*lpddoi);
-	return DIENUM_CONTINUE;
+  ((std::list<DIDEVICEOBJECTINSTANCE>*)pvRef)->push_back(*lpddoi);
+  return DIENUM_CONTINUE;
 }
 
 BOOL CALLBACK DIEnumDevicesCallback(LPCDIDEVICEINSTANCE lpddi, LPVOID pvRef)
 {
-	((std::list<DIDEVICEINSTANCE>*)pvRef)->push_back(*lpddi);
-	return DIENUM_CONTINUE;
+  ((std::list<DIDEVICEINSTANCE>*)pvRef)->push_back(*lpddi);
+  return DIENUM_CONTINUE;
 }
 
 std::string GetDeviceName(const LPDIRECTINPUTDEVICE8 device)
 {
-	DIPROPSTRING str = {};
-	str.diph.dwSize = sizeof(str);
-	str.diph.dwHeaderSize = sizeof(str.diph);
-	str.diph.dwHow = DIPH_DEVICE;
+  DIPROPSTRING str = {};
+  str.diph.dwSize = sizeof(str);
+  str.diph.dwHeaderSize = sizeof(str.diph);
+  str.diph.dwHow = DIPH_DEVICE;
 
-	std::string result;
-	if (SUCCEEDED(device->GetProperty(DIPROP_PRODUCTNAME, &str.diph)))
-	{
-		result = StripSpaces(UTF16ToUTF8(str.wsz));
-	}
+  std::string result;
+  if (SUCCEEDED(device->GetProperty(DIPROP_PRODUCTNAME, &str.diph)))
+  {
+    result = StripSpaces(WStringToUTF8(str.wsz));
+  }
+  else
+  {
+    ERROR_LOG_FMT(PAD, "GetProperty(DIPROP_PRODUCTNAME) failed.");
+  }
 
-	return result;
+  return result;
 }
 
-void Init(std::vector<Core::Device*>& devices, HWND hwnd)
+void PopulateDevices(HWND hwnd)
 {
-	IDirectInput8* idi8;
-	if (FAILED(DirectInput8Create(GetModuleHandle(nullptr), DIRECTINPUT_VERSION,
-		IID_IDirectInput8, (LPVOID*)&idi8, nullptr)))
-	{
-		return;
-	}
+  // Remove unplugged devices.
+  g_controller_interface.RemoveDevice(
+      [](const auto* dev) { return dev->GetSource() == DINPUT_SOURCE_NAME && !dev->IsValid(); });
 
-	InitKeyboardMouse(idi8, devices, hwnd);
-	InitJoystick(idi8, devices, hwnd);
+  IDirectInput8* idi8;
+  if (FAILED(DirectInput8Create(GetModuleHandle(nullptr), DIRECTINPUT_VERSION, IID_IDirectInput8,
+                                (LPVOID*)&idi8, nullptr)))
+  {
+    ERROR_LOG_FMT(PAD, "DirectInput8Create failed.");
+    return;
+  }
 
-	idi8->Release();
+  InitKeyboardMouse(idi8, hwnd);
+  InitJoystick(idi8, hwnd);
 
+  idi8->Release();
 }
-
-}
-}
+}  // namespace ciface::DInput

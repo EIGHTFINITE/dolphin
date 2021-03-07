@@ -106,7 +106,7 @@ MEM_LO:		equ	0x0f7F
 	jmp		start_of_test
 
 ; This is where we jump when we're done testing, see above.
-; We just fall into a loop, playing dead until someone resets the DSP.	
+; We just fall into a loop, playing dead until someone resets the DSP.
 end_of_test:
 	nop
 	jmp		end_of_test
@@ -138,8 +138,18 @@ irq4:
 	lri		$ac0.m, #0x0004
 	jmp		irq
 irq5:
-	lri		$ac0.m, #0x0005
-	jmp		irq
+	lrs		$ac0.m, @DMBH
+	andcf		$ac0.m, #0x8000
+	jlz		irq5
+	si		@DMBH, #0x8005
+	si		@DMBL, #0x0000
+	si		@DIRQ, #0x0001
+	lri		$ac0.m, #0xbbbb
+	sr		@0xffda, $ac0.m ; pred scale
+	sr		@0xffdb, $ac0.m ; yn1
+	lr		$ix2, @ARAM
+	sr		@0xffdc, $ac0.m ; yn2
+	rti
 irq6:
 	lri		$ac0.m, #0x0006
 	jmp		irq
@@ -156,13 +166,12 @@ irq:
 	si		@DIRQ, #0x0001
 	halt		; Through some magic this allows us to properly ack the exception in dspspy
 	;rti		; allow dumping of ucodes which cause exceptions...probably not safe at all
-	
+
 ; DMA:s the current state of the registers back to the PowerPC. To do this,
 ; it must write the contents of all regs to DRAM.
-; Unfortunately, this loop uses ar0 so it's best to use AR1 and friends for testing
-; when messing with indexing.
 send_back:
-	; make state safe.
+	; first, store $sr so we can modify it
+	sr	@(REGS_BASE + 19), $sr
 	set16
 	; store registers to reg table
 	sr		@REGS_BASE,  $ar0
@@ -185,7 +194,8 @@ send_back:
 	srri	@$ar0, $ac0.h
 	srri	@$ar0, $ac1.h
 	srri	@$ar0, $cr
-	srri	@$ar0, $sr
+	; skip $sr since we already stored and modified it
+	iar	$ar0
 	srri	@$ar0, $prod.l
 	srri	@$ar0, $prod.m1
 	srri	@$ar0, $prod.h
@@ -216,13 +226,13 @@ send_back:
 dma_copy:
 	mrr		$ax0.l, $ac1.m
 
-; Wait for the CPU to send us a mail.	
+; Wait for the CPU to send us a mail.
 	call	0x807e
 	si		@DMBH, #0x8888
 	si		@DMBL, #0xfeeb
 	si		@DIRQ, #0x0001
-	
-; wait for the CPU to recieve our response before we execute the next op	
+
+; wait for the CPU to recieve our response before we execute the next op
 	call	0x8078
 	andi	$ac0.m, #0x7fff
 	lrs		$ac1.m, @CMBL
@@ -247,7 +257,8 @@ dma_copy:
 	lrri	$ac0.h, @$ar0
 	lrri	$ac1.h, @$ar0
 	lrri	$cr, @$ar0
-	lrri	$sr, @$ar0
+	; leave $sr for later
+	iar	$ar0
 	lrri	$prod.l, @$ar0
 	lrri	$prod.m1, @$ar0
 	lrri	$prod.h, @$ar0
@@ -260,17 +271,10 @@ dma_copy:
 	lrri	$ac1.l, @$ar0
 	lrri	$ac0.m, @$ar0
 	lrri	$ac1.m, @$ar0
-	lr		$ar0, @REGS_BASE
-	
+	lr	$ar0, @REGS_BASE
+	lr	$sr, @(REGS_BASE+19)
+
 	ret		; from send_back
-	
-; If you are in set40 mode, use this instead of send_back if you want to stay
-; in set40 mode.
-send_back_40:
-	set16
-	call	send_back	
-	set40
-	ret
 
 ; Obviously this must be included directly before your test code
 start_of_test:
