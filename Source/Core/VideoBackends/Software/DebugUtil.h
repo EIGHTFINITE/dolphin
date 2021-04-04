@@ -4,22 +4,23 @@
 
 #pragma once
 
-#include "Common/Common.h"
+#include "Common/CommonTypes.h"
 
 namespace DebugUtil
 {
-	void Init();
-	void Shutdown();
+void Init();
+void Shutdown();
 
-	void GetTextureRGBA(u8 *dst, u32 texmap, s32 mip, u32 width, u32 height);
+void GetTextureRGBA(u8* dst, u32 texmap, s32 mip, u32 width, u32 height);
 
-	void DumpActiveTextures();
+void DumpActiveTextures();
 
-	void OnObjectBegin();
-	void OnObjectEnd();
+void OnObjectBegin();
+void OnObjectEnd();
 
-	void DrawObjectBuffer(s16 x, s16 y, u8 *color, int bufferBase, int subBuffer, const char *name);
+void DrawObjectBuffer(s16 x, s16 y, const u8* color, int bufferBase, int subBuffer,
+                      const char* name);
 
-	void DrawTempBuffer(u8 *color, int buffer);
-	void CopyTempBuffer(s16 x, s16 y, int bufferBase, int subBuffer, const char *name);
-}
+void DrawTempBuffer(const u8* color, int buffer);
+void CopyTempBuffer(s16 x, s16 y, int bufferBase, int subBuffer, const char* name);
+}  // namespace DebugUtil

@@ -7,210 +7,211 @@
 #include "Common/CommonTypes.h"
 #include "Common/StringUtil.h"
 
-#include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
-#include "Core/PowerPC/PowerPC.h"
-#include "Core/PowerPC/PPCTables.h"
 #include "Core/PowerPC/JitArm64/Jit.h"
 #include "Core/PowerPC/JitArm64/JitArm64_RegCache.h"
+#include "Core/PowerPC/PPCTables.h"
+#include "Core/PowerPC/PowerPC.h"
 
 using namespace Arm64Gen;
 
 void JitArm64::psq_l(UGeckoInstruction inst)
 {
-	INSTRUCTION_START
-	JITDISABLE(bJITLoadStorePairedOff);
-	FALLBACK_IF(jo.memcheck || !jo.fastmem);
+  INSTRUCTION_START
+  JITDISABLE(bJITLoadStorePairedOff);
+  FALLBACK_IF(jo.memcheck || !jo.fastmem);
 
-	// X30 is LR
-	// X0 contains the scale
-	// X1 is the address
-	// X2 is a temporary
-	// Q0 is the return register
-	// Q1 is a temporary
-	bool update = inst.OPCD == 57;
-	s32 offset = inst.SIMM_12;
+  // The asm routines assume address translation is on.
+  FALLBACK_IF(!MSR.DR);
 
-	gpr.Lock(W0, W1, W2, W30);
-	fpr.Lock(Q0, Q1);
+  // X30 is LR
+  // X0 contains the scale
+  // X1 is the address
+  // X2 is a temporary
+  // Q0 is the return register
+  // Q1 is a temporary
+  const bool update = inst.OPCD == 57;
+  const s32 offset = inst.SIMM_12;
 
-	ARM64Reg arm_addr = gpr.R(inst.RA);
-	ARM64Reg scale_reg = W0;
-	ARM64Reg addr_reg = W1;
-	ARM64Reg type_reg = W2;
-	ARM64Reg VS;
+  gpr.Lock(ARM64Reg::W0, ARM64Reg::W1, ARM64Reg::W2, ARM64Reg::W30);
+  fpr.Lock(ARM64Reg::Q0, ARM64Reg::Q1);
 
-	if (inst.RA || update) // Always uses the register on update
-	{
-		if (offset >= 0)
-			ADD(addr_reg, arm_addr, offset);
-		else
-			SUB(addr_reg, arm_addr, std::abs(offset));
-	}
-	else
-	{
-		MOVI2R(addr_reg, (u32)offset);
-	}
+  const ARM64Reg arm_addr = gpr.R(inst.RA);
+  constexpr ARM64Reg scale_reg = ARM64Reg::W0;
+  constexpr ARM64Reg addr_reg = ARM64Reg::W1;
+  constexpr ARM64Reg type_reg = ARM64Reg::W2;
+  ARM64Reg VS;
 
-	if (update)
-	{
-		gpr.BindToRegister(inst.RA, REG_REG);
-		MOV(arm_addr, addr_reg);
-	}
+  if (inst.RA || update)  // Always uses the register on update
+  {
+    if (offset >= 0)
+      ADD(addr_reg, arm_addr, offset);
+    else
+      SUB(addr_reg, arm_addr, std::abs(offset));
+  }
+  else
+  {
+    MOVI2R(addr_reg, (u32)offset);
+  }
 
-	if (js.assumeNoPairedQuantize)
-	{
-		VS = fpr.RW(inst.RS, REG_REG_SINGLE);
-		if (!inst.W)
-		{
-			ADD(EncodeRegTo64(addr_reg), EncodeRegTo64(addr_reg), MEM_REG);
-			m_float_emit.LD1(32, 1, EncodeRegToDouble(VS), EncodeRegTo64(addr_reg));
-		}
-		else
-		{
-			m_float_emit.LDR(32, VS, EncodeRegTo64(addr_reg), MEM_REG);
-		}
-		m_float_emit.REV32(8, EncodeRegToDouble(VS), EncodeRegToDouble(VS));
-	}
-	else
-	{
-		LDR(INDEX_UNSIGNED, scale_reg, PPC_REG, PPCSTATE_OFF(spr[SPR_GQR0 + inst.I]));
-		UBFM(type_reg, scale_reg, 16, 18); // Type
-		UBFM(scale_reg, scale_reg, 24, 29); // Scale
+  if (update)
+  {
+    gpr.BindToRegister(inst.RA, true);
+    MOV(arm_addr, addr_reg);
+  }
 
-		MOVI2R(X30, (u64)&pairedLoadQuantized[inst.W * 8]);
-		LDR(X30, X30, ArithOption(EncodeRegTo64(type_reg), true));
-		BLR(X30);
+  if (js.assumeNoPairedQuantize)
+  {
+    VS = fpr.RW(inst.RS, RegType::Single);
+    if (!inst.W)
+    {
+      ADD(EncodeRegTo64(addr_reg), EncodeRegTo64(addr_reg), MEM_REG);
+      m_float_emit.LD1(32, 1, EncodeRegToDouble(VS), EncodeRegTo64(addr_reg));
+    }
+    else
+    {
+      m_float_emit.LDR(32, VS, EncodeRegTo64(addr_reg), MEM_REG);
+    }
+    m_float_emit.REV32(8, EncodeRegToDouble(VS), EncodeRegToDouble(VS));
+  }
+  else
+  {
+    LDR(IndexType::Unsigned, scale_reg, PPC_REG, PPCSTATE_OFF_SPR(SPR_GQR0 + inst.I));
+    UBFM(type_reg, scale_reg, 16, 18);   // Type
+    UBFM(scale_reg, scale_reg, 24, 29);  // Scale
 
-		VS = fpr.RW(inst.RS, REG_REG_SINGLE);
-		m_float_emit.ORR(EncodeRegToDouble(VS), D0, D0);
-	}
+    MOVP2R(ARM64Reg::X30, inst.W ? single_load_quantized : paired_load_quantized);
+    LDR(EncodeRegTo64(type_reg), ARM64Reg::X30, ArithOption(EncodeRegTo64(type_reg), true));
+    BLR(EncodeRegTo64(type_reg));
 
-	if (inst.W)
-	{
-		m_float_emit.FMOV(S0, 0x70); // 1.0 as a Single
-		m_float_emit.INS(32, VS, 1, Q0, 0);
-	}
+    VS = fpr.RW(inst.RS, RegType::Single);
+    m_float_emit.ORR(EncodeRegToDouble(VS), ARM64Reg::D0, ARM64Reg::D0);
+  }
 
-	gpr.Unlock(W0, W1, W2, W30);
-	fpr.Unlock(Q0, Q1);
+  if (inst.W)
+  {
+    m_float_emit.FMOV(ARM64Reg::S0, 0x70);  // 1.0 as a Single
+    m_float_emit.INS(32, VS, 1, ARM64Reg::Q0, 0);
+  }
+
+  gpr.Unlock(ARM64Reg::W0, ARM64Reg::W1, ARM64Reg::W2, ARM64Reg::W30);
+  fpr.Unlock(ARM64Reg::Q0, ARM64Reg::Q1);
 }
 
 void JitArm64::psq_st(UGeckoInstruction inst)
 {
-	INSTRUCTION_START
-	JITDISABLE(bJITLoadStorePairedOff);
-	FALLBACK_IF(jo.memcheck || !jo.fastmem);
+  INSTRUCTION_START
+  JITDISABLE(bJITLoadStorePairedOff);
+  FALLBACK_IF(jo.memcheck || !jo.fastmem);
 
-	// X30 is LR
-	// X0 contains the scale
-	// X1 is the address
-	// Q0 is the store register
+  // The asm routines assume address translation is on.
+  FALLBACK_IF(!MSR.DR);
 
-	bool update = inst.OPCD == 61;
-	s32 offset = inst.SIMM_12;
+  // X30 is LR
+  // X0 contains the scale
+  // X1 is the address
+  // Q0 is the store register
 
-	gpr.Lock(W0, W1, W2, W30);
-	fpr.Lock(Q0, Q1);
+  const bool update = inst.OPCD == 61;
+  const s32 offset = inst.SIMM_12;
 
-	bool single = fpr.IsSingle(inst.RS);
+  gpr.Lock(ARM64Reg::W0, ARM64Reg::W1, ARM64Reg::W2, ARM64Reg::W30);
+  fpr.Lock(ARM64Reg::Q0, ARM64Reg::Q1);
 
-	ARM64Reg arm_addr = gpr.R(inst.RA);
-	ARM64Reg VS = fpr.R(inst.RS, single ? REG_REG_SINGLE : REG_REG);
+  const bool single = fpr.IsSingle(inst.RS);
 
-	ARM64Reg scale_reg = W0;
-	ARM64Reg addr_reg = W1;
-	ARM64Reg type_reg = W2;
+  const ARM64Reg arm_addr = gpr.R(inst.RA);
+  const ARM64Reg VS = fpr.R(inst.RS, single ? RegType::Single : RegType::Register);
 
-	BitSet32 gprs_in_use = gpr.GetCallerSavedUsed();
-	BitSet32 fprs_in_use = fpr.GetCallerSavedUsed();
+  constexpr ARM64Reg scale_reg = ARM64Reg::W0;
+  constexpr ARM64Reg addr_reg = ARM64Reg::W1;
+  constexpr ARM64Reg type_reg = ARM64Reg::W2;
 
-	// Wipe the registers we are using as temporaries
-	gprs_in_use &= BitSet32(~7);
-	fprs_in_use &= BitSet32(~3);
+  BitSet32 gprs_in_use = gpr.GetCallerSavedUsed();
+  BitSet32 fprs_in_use = fpr.GetCallerSavedUsed();
 
-	if (inst.RA || update) // Always uses the register on update
-	{
-		if (offset >= 0)
-			ADD(addr_reg, gpr.R(inst.RA), offset);
-		else
-			SUB(addr_reg, gpr.R(inst.RA), std::abs(offset));
-	}
-	else
-	{
-		MOVI2R(addr_reg, (u32)offset);
-	}
+  // Wipe the registers we are using as temporaries
+  gprs_in_use &= BitSet32(~7);
+  fprs_in_use &= BitSet32(~3);
 
-	if (update)
-	{
-		gpr.BindToRegister(inst.RA, REG_REG);
-		MOV(arm_addr, addr_reg);
-	}
+  if (inst.RA || update)  // Always uses the register on update
+  {
+    if (offset >= 0)
+      ADD(addr_reg, gpr.R(inst.RA), offset);
+    else
+      SUB(addr_reg, gpr.R(inst.RA), std::abs(offset));
+  }
+  else
+  {
+    MOVI2R(addr_reg, (u32)offset);
+  }
 
-	if (js.assumeNoPairedQuantize)
-	{
-		u32 flags = BackPatchInfo::FLAG_STORE;
+  if (update)
+  {
+    gpr.BindToRegister(inst.RA, true);
+    MOV(arm_addr, addr_reg);
+  }
 
-		if (single)
-			flags |= (inst.W ? BackPatchInfo::FLAG_SIZE_F32I : BackPatchInfo::FLAG_SIZE_F32X2I);
-		else
-			flags |= (inst.W ? BackPatchInfo::FLAG_SIZE_F32 : BackPatchInfo::FLAG_SIZE_F32X2);
+  if (js.assumeNoPairedQuantize)
+  {
+    u32 flags = BackPatchInfo::FLAG_STORE;
 
-		EmitBackpatchRoutine(flags,
-			jo.fastmem,
-			jo.fastmem,
-			VS, EncodeRegTo64(addr_reg),
-			gprs_in_use,
-			fprs_in_use);
-	}
-	else
-	{
-		if (single)
-		{
-			m_float_emit.ORR(D0, VS, VS);
-		}
-		else
-		{
-			if (inst.W)
-				m_float_emit.FCVT(32, 64, D0, VS);
-			else
-				m_float_emit.FCVTN(32, D0, VS);
-		}
+    if (single)
+      flags |= (inst.W ? BackPatchInfo::FLAG_SIZE_F32I : BackPatchInfo::FLAG_SIZE_F32X2I);
+    else
+      flags |= (inst.W ? BackPatchInfo::FLAG_SIZE_F32 : BackPatchInfo::FLAG_SIZE_F32X2);
 
-		LDR(INDEX_UNSIGNED, scale_reg, PPC_REG, PPCSTATE_OFF(spr[SPR_GQR0 + inst.I]));
-		UBFM(type_reg, scale_reg, 0, 2); // Type
-		UBFM(scale_reg, scale_reg, 8, 13); // Scale
+    EmitBackpatchRoutine(flags, jo.fastmem, jo.fastmem, VS, EncodeRegTo64(addr_reg), gprs_in_use,
+                         fprs_in_use);
+  }
+  else
+  {
+    if (single)
+    {
+      m_float_emit.ORR(ARM64Reg::D0, VS, VS);
+    }
+    else
+    {
+      if (inst.W)
+        m_float_emit.FCVT(32, 64, ARM64Reg::D0, VS);
+      else
+        m_float_emit.FCVTN(32, ARM64Reg::D0, VS);
+    }
 
-		// Inline address check
-		TST(addr_reg, 6, 1);
-		FixupBranch pass = B(CC_EQ);
-		FixupBranch fail = B();
+    LDR(IndexType::Unsigned, scale_reg, PPC_REG, PPCSTATE_OFF_SPR(SPR_GQR0 + inst.I));
+    UBFM(type_reg, scale_reg, 0, 2);    // Type
+    UBFM(scale_reg, scale_reg, 8, 13);  // Scale
 
-		SwitchToFarCode();
-			SetJumpTarget(fail);
-			// Slow
-			MOVI2R(X30, (u64)&pairedStoreQuantized[16 + inst.W * 8]);
-			LDR(EncodeRegTo64(type_reg), X30, ArithOption(EncodeRegTo64(type_reg), true));
+    // Inline address check
+    // FIXME: This doesn't correctly account for the BAT configuration.
+    TST(addr_reg, 6, 1);
+    FixupBranch pass = B(CC_EQ);
+    FixupBranch fail = B();
 
-			ABI_PushRegisters(gprs_in_use);
-			m_float_emit.ABI_PushRegisters(fprs_in_use, X30);
-			BLR(EncodeRegTo64(type_reg));
-			m_float_emit.ABI_PopRegisters(fprs_in_use, X30);
-			ABI_PopRegisters(gprs_in_use);
-			FixupBranch continue1 = B();
-		SwitchToNearCode();
-		SetJumpTarget(pass);
+    SwitchToFarCode();
+    SetJumpTarget(fail);
+    // Slow
+    MOVP2R(ARM64Reg::X30, &paired_store_quantized[16 + inst.W * 8]);
+    LDR(EncodeRegTo64(type_reg), ARM64Reg::X30, ArithOption(EncodeRegTo64(type_reg), true));
 
-		// Fast
-		MOVI2R(X30, (u64)&pairedStoreQuantized[inst.W * 8]);
-		LDR(EncodeRegTo64(type_reg), X30, ArithOption(EncodeRegTo64(type_reg), true));
-		BLR(EncodeRegTo64(type_reg));
+    ABI_PushRegisters(gprs_in_use);
+    m_float_emit.ABI_PushRegisters(fprs_in_use, ARM64Reg::X30);
+    BLR(EncodeRegTo64(type_reg));
+    m_float_emit.ABI_PopRegisters(fprs_in_use, ARM64Reg::X30);
+    ABI_PopRegisters(gprs_in_use);
+    FixupBranch continue1 = B();
+    SwitchToNearCode();
+    SetJumpTarget(pass);
 
-		SetJumpTarget(continue1);
-	}
+    // Fast
+    MOVP2R(ARM64Reg::X30, &paired_store_quantized[inst.W * 8]);
+    LDR(EncodeRegTo64(type_reg), ARM64Reg::X30, ArithOption(EncodeRegTo64(type_reg), true));
+    BLR(EncodeRegTo64(type_reg));
 
-	gpr.Unlock(W0, W1, W2, W30);
-	fpr.Unlock(Q0, Q1);
+    SetJumpTarget(continue1);
+  }
+
+  gpr.Unlock(ARM64Reg::W0, ARM64Reg::W1, ARM64Reg::W2, ARM64Reg::W30);
+  fpr.Unlock(ARM64Reg::Q0, ARM64Reg::Q1);
 }
-

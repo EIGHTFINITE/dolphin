@@ -2,27 +2,26 @@
 // Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include "Core/HW/CPU.h"
+
 #include <condition_variable>
 #include <mutex>
+#include <queue>
 
 #include "AudioCommon/AudioCommon.h"
 #include "Common/CommonTypes.h"
 #include "Common/Event.h"
-#include "Common/Logging/Log.h"
 #include "Core/Core.h"
 #include "Core/Host.h"
-#include "Core/HW/CPU.h"
-#include "Core/HW/Memmap.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "VideoCommon/Fifo.h"
 
 namespace CPU
 {
-
 // CPU Thread execution state.
 // Requires s_state_change_lock to modify the value.
 // Read access is unsynchronized.
-static State s_state = CPU_POWERDOWN;
+static State s_state = State::PowerDown;
 
 // Synchronizes EnableStepping and PauseAndLock so only one instance can be
 // active at a time. Simplifies code by eliminating several edge cases where
@@ -36,157 +35,174 @@ static std::mutex s_stepping_lock;
 
 // Primary lock. Protects changing s_state, requesting instruction stepping and
 // pause-and-locking.
-static std::mutex              s_state_change_lock;
+static std::mutex s_state_change_lock;
 // When s_state_cpu_thread_active changes to false
 static std::condition_variable s_state_cpu_idle_cvar;
 // When s_state changes / s_state_paused_and_locked becomes false (for CPU Thread only)
 static std::condition_variable s_state_cpu_cvar;
-static bool                    s_state_cpu_thread_active         = false;
-static bool                    s_state_paused_and_locked         = false;
-static bool                    s_state_system_request_stepping   = false;
-static bool                    s_state_cpu_step_instruction      = false;
-static Common::Event*          s_state_cpu_step_instruction_sync = nullptr;
+static bool s_state_cpu_thread_active = false;
+static bool s_state_paused_and_locked = false;
+static bool s_state_system_request_stepping = false;
+static bool s_state_cpu_step_instruction = false;
+static Common::Event* s_state_cpu_step_instruction_sync = nullptr;
+static std::queue<std::function<void()>> s_pending_jobs;
 
-void Init(int cpu_core)
+void Init(PowerPC::CPUCore cpu_core)
 {
-	PowerPC::Init(cpu_core);
-	s_state = CPU_STEPPING;
+  PowerPC::Init(cpu_core);
+  s_state = State::Stepping;
 }
 
 void Shutdown()
 {
-	Stop();
-	PowerPC::Shutdown();
+  Stop();
+  PowerPC::Shutdown();
 }
 
 // Requires holding s_state_change_lock
 static void FlushStepSyncEventLocked()
 {
-	if (s_state_cpu_step_instruction_sync)
-	{
-		s_state_cpu_step_instruction_sync->Set();
-		s_state_cpu_step_instruction_sync = nullptr;
-	}
-	s_state_cpu_step_instruction = false;
+  if (!s_state_cpu_step_instruction)
+    return;
+
+  if (s_state_cpu_step_instruction_sync)
+  {
+    s_state_cpu_step_instruction_sync->Set();
+    s_state_cpu_step_instruction_sync = nullptr;
+  }
+  s_state_cpu_step_instruction = false;
+}
+
+static void ExecutePendingJobs(std::unique_lock<std::mutex>& state_lock)
+{
+  while (!s_pending_jobs.empty())
+  {
+    auto callback = s_pending_jobs.front();
+    s_pending_jobs.pop();
+    state_lock.unlock();
+    callback();
+    state_lock.lock();
+  }
 }
 
 void Run()
 {
-	std::unique_lock<std::mutex> state_lock(s_state_change_lock);
-	while (s_state != CPU_POWERDOWN)
-	{
-		s_state_cpu_cvar.wait(state_lock, [] { return !s_state_paused_and_locked; });
+  std::unique_lock state_lock(s_state_change_lock);
+  while (s_state != State::PowerDown)
+  {
+    s_state_cpu_cvar.wait(state_lock, [] { return !s_state_paused_and_locked; });
+    ExecutePendingJobs(state_lock);
 
-		switch (s_state)
-		{
-		case CPU_RUNNING:
-			s_state_cpu_thread_active = true;
-			state_lock.unlock();
+    switch (s_state)
+    {
+    case State::Running:
+      s_state_cpu_thread_active = true;
+      state_lock.unlock();
 
-			// Adjust PC for JIT when debugging
-			// SingleStep so that the "continue", "step over" and "step out" debugger functions
-			// work when the PC is at a breakpoint at the beginning of the block
-			// If watchpoints are enabled, any instruction could be a breakpoint.
-			if (PowerPC::GetMode() != PowerPC::MODE_INTERPRETER)
-			{
-#ifndef ENABLE_MEM_CHECK
-				if (PowerPC::breakpoints.IsAddressBreakPoint(PC))
-#endif
-				{
-					PowerPC::CoreMode old_mode = PowerPC::GetMode();
-					PowerPC::SetMode(PowerPC::MODE_INTERPRETER);
-					PowerPC::SingleStep();
-					PowerPC::SetMode(old_mode);
-				}
-			}
+      // Adjust PC for JIT when debugging
+      // SingleStep so that the "continue", "step over" and "step out" debugger functions
+      // work when the PC is at a breakpoint at the beginning of the block
+      // If watchpoints are enabled, any instruction could be a breakpoint.
+      if (PowerPC::GetMode() != PowerPC::CoreMode::Interpreter)
+      {
+        if (PowerPC::breakpoints.IsAddressBreakPoint(PC) || PowerPC::memchecks.HasAny())
+        {
+          s_state = State::Stepping;
+          PowerPC::CoreMode old_mode = PowerPC::GetMode();
+          PowerPC::SetMode(PowerPC::CoreMode::Interpreter);
+          PowerPC::SingleStep();
+          PowerPC::SetMode(old_mode);
+          s_state = State::Running;
+        }
+      }
 
-			// Enter a fast runloop
-			PowerPC::RunLoop();
+      // Enter a fast runloop
+      PowerPC::RunLoop();
 
-			state_lock.lock();
-			s_state_cpu_thread_active = false;
-			s_state_cpu_idle_cvar.notify_all();
-			break;
+      state_lock.lock();
+      s_state_cpu_thread_active = false;
+      s_state_cpu_idle_cvar.notify_all();
+      break;
 
-		case CPU_STEPPING:
-			// Wait for step command.
-			s_state_cpu_cvar.wait(state_lock, []
-			{
-				return s_state_cpu_step_instruction ||
-				       s_state != CPU_STEPPING;
-			});
-			if (s_state != CPU_STEPPING)
-			{
-				// Signal event if the mode changes.
-				FlushStepSyncEventLocked();
-				continue;
-			}
-			if (s_state_paused_and_locked)
-				continue;
+    case State::Stepping:
+      // Wait for step command.
+      s_state_cpu_cvar.wait(state_lock, [&state_lock] {
+        ExecutePendingJobs(state_lock);
+        return s_state_cpu_step_instruction || !IsStepping();
+      });
+      if (!IsStepping())
+      {
+        // Signal event if the mode changes.
+        FlushStepSyncEventLocked();
+        continue;
+      }
+      if (s_state_paused_and_locked)
+        continue;
 
-			// Do step
-			s_state_cpu_thread_active = true;
-			state_lock.unlock();
+      // Do step
+      s_state_cpu_thread_active = true;
+      state_lock.unlock();
 
-			PowerPC::SingleStep();
+      PowerPC::SingleStep();
 
-			state_lock.lock();
-			s_state_cpu_thread_active = false;
-			s_state_cpu_idle_cvar.notify_all();
+      state_lock.lock();
+      s_state_cpu_thread_active = false;
+      s_state_cpu_idle_cvar.notify_all();
 
-			// Update disasm dialog
-			FlushStepSyncEventLocked();
-			Host_UpdateDisasmDialog();
-			break;
+      // Update disasm dialog
+      FlushStepSyncEventLocked();
+      Host_UpdateDisasmDialog();
+      break;
 
-		case CPU_POWERDOWN:
-			break;
-		}
-	}
-	state_lock.unlock();
-	Host_UpdateDisasmDialog();
+    case State::PowerDown:
+      break;
+    }
+  }
+  state_lock.unlock();
+  Host_UpdateDisasmDialog();
 }
 
 // Requires holding s_state_change_lock
 static void RunAdjacentSystems(bool running)
 {
-	// NOTE: We're assuming these will not try to call Break or EnableStepping.
-	Fifo::EmulatorState(running);
-	AudioCommon::ClearAudioBuffer(!running);
+  // NOTE: We're assuming these will not try to call Break or EnableStepping.
+  Fifo::EmulatorState(running);
+  // Core is responsible for shutting down the sound stream.
+  if (s_state != State::PowerDown)
+    AudioCommon::SetSoundStreamRunning(running);
 }
 
 void Stop()
 {
-	// Change state and wait for it to be acknowledged.
-	// We don't need the stepping lock because CPU_POWERDOWN is a priority state which
-	// will stick permanently.
-	std::unique_lock<std::mutex> state_lock(s_state_change_lock);
-	s_state = CPU_POWERDOWN;
-	s_state_cpu_cvar.notify_one();
-	// FIXME: MsgHandler can cause this to deadlock the GUI Thread. Remove the timeout.
-	bool success = s_state_cpu_idle_cvar.wait_for(state_lock, std::chrono::seconds(5), []
-	{
-		return !s_state_cpu_thread_active;
-	});
-	if (!success)
-		ERROR_LOG(POWERPC, "CPU Thread failed to acknowledge CPU_POWERDOWN. It may be deadlocked.");
-	RunAdjacentSystems(false);
-	FlushStepSyncEventLocked();
+  // Change state and wait for it to be acknowledged.
+  // We don't need the stepping lock because State::PowerDown is a priority state which
+  // will stick permanently.
+  std::unique_lock state_lock(s_state_change_lock);
+  s_state = State::PowerDown;
+  s_state_cpu_cvar.notify_one();
+
+  while (s_state_cpu_thread_active)
+  {
+    s_state_cpu_idle_cvar.wait(state_lock);
+  }
+
+  RunAdjacentSystems(false);
+  FlushStepSyncEventLocked();
 }
 
 bool IsStepping()
 {
-	return s_state == CPU_STEPPING;
+  return s_state == State::Stepping;
 }
 
 State GetState()
 {
-	return s_state;
+  return s_state;
 }
 
-const volatile State* GetStatePtr()
+const State* GetStatePtr()
 {
-	return &s_state;
+  return &s_state;
 }
 
 void Reset()
@@ -195,142 +211,141 @@ void Reset()
 
 void StepOpcode(Common::Event* event)
 {
-	std::lock_guard<std::mutex> state_lock(s_state_change_lock);
-	// If we're not stepping then this is pointless
-	if (!IsStepping())
-	{
-		if (event)
-			event->Set();
-		return;
-	}
+  std::lock_guard state_lock(s_state_change_lock);
+  // If we're not stepping then this is pointless
+  if (!IsStepping())
+  {
+    if (event)
+      event->Set();
+    return;
+  }
 
-	// Potential race where the previous step has not been serviced yet.
-	if (s_state_cpu_step_instruction_sync && s_state_cpu_step_instruction_sync != event)
-		s_state_cpu_step_instruction_sync->Set();
+  // Potential race where the previous step has not been serviced yet.
+  if (s_state_cpu_step_instruction_sync && s_state_cpu_step_instruction_sync != event)
+    s_state_cpu_step_instruction_sync->Set();
 
-	s_state_cpu_step_instruction = true;
-	s_state_cpu_step_instruction_sync = event;
-	s_state_cpu_cvar.notify_one();
+  s_state_cpu_step_instruction = true;
+  s_state_cpu_step_instruction_sync = event;
+  s_state_cpu_cvar.notify_one();
 }
 
 // Requires s_state_change_lock
 static bool SetStateLocked(State s)
 {
-	if (s_state == CPU_POWERDOWN)
-		return false;
-	s_state = s;
-	return true;
+  if (s_state == State::PowerDown)
+    return false;
+  s_state = s;
+  return true;
 }
 
 void EnableStepping(bool stepping)
 {
-	std::lock_guard<std::mutex> stepping_lock(s_stepping_lock);
-	std::unique_lock<std::mutex> state_lock(s_state_change_lock);
+  std::lock_guard stepping_lock(s_stepping_lock);
+  std::unique_lock state_lock(s_state_change_lock);
 
-	if (stepping)
-	{
-		SetStateLocked(CPU_STEPPING);
+  if (stepping)
+  {
+    SetStateLocked(State::Stepping);
 
-		// Wait for the CPU Thread to leave the run loop
-		// FIXME: MsgHandler can cause this to deadlock the GUI Thread. Remove the timeout.
-		bool success = s_state_cpu_idle_cvar.wait_for(state_lock, std::chrono::seconds(5), []
-		{
-			return !s_state_cpu_thread_active;
-		});
-		if (!success)
-			ERROR_LOG(POWERPC, "Abandoned waiting for CPU Thread! The Core may be deadlocked.");
+    while (s_state_cpu_thread_active)
+    {
+      s_state_cpu_idle_cvar.wait(state_lock);
+    }
 
-		RunAdjacentSystems(false);
-	}
-	else if (SetStateLocked(CPU_RUNNING))
-	{
-		s_state_cpu_cvar.notify_one();
-		RunAdjacentSystems(true);
-	}
+    RunAdjacentSystems(false);
+  }
+  else if (SetStateLocked(State::Running))
+  {
+    s_state_cpu_cvar.notify_one();
+    RunAdjacentSystems(true);
+  }
 }
 
 void Break()
 {
-	std::lock_guard<std::mutex> state_lock(s_state_change_lock);
+  std::lock_guard state_lock(s_state_change_lock);
 
-	// If another thread is trying to PauseAndLock then we need to remember this
-	// for later to ignore the unpause_on_unlock.
-	if (s_state_paused_and_locked)
-	{
-		s_state_system_request_stepping = true;
-		return;
-	}
+  // If another thread is trying to PauseAndLock then we need to remember this
+  // for later to ignore the unpause_on_unlock.
+  if (s_state_paused_and_locked)
+  {
+    s_state_system_request_stepping = true;
+    return;
+  }
 
-	// We'll deadlock if we synchronize, the CPU may block waiting for our caller to
-	// finish resulting in the CPU loop never terminating.
-	SetStateLocked(CPU_STEPPING);
-	RunAdjacentSystems(false);
+  // We'll deadlock if we synchronize, the CPU may block waiting for our caller to
+  // finish resulting in the CPU loop never terminating.
+  SetStateLocked(State::Stepping);
+  RunAdjacentSystems(false);
 }
 
 bool PauseAndLock(bool do_lock, bool unpause_on_unlock, bool control_adjacent)
 {
-	// NOTE: This is protected by s_stepping_lock.
-	static bool s_have_fake_cpu_thread = false;
-	bool was_unpaused = false;
+  // NOTE: This is protected by s_stepping_lock.
+  static bool s_have_fake_cpu_thread = false;
+  bool was_unpaused = false;
 
-	if (do_lock)
-	{
-		s_stepping_lock.lock();
+  if (do_lock)
+  {
+    s_stepping_lock.lock();
 
-		std::unique_lock<std::mutex> state_lock(s_state_change_lock);
-		s_state_paused_and_locked = true;
+    std::unique_lock state_lock(s_state_change_lock);
+    s_state_paused_and_locked = true;
 
-		was_unpaused = s_state == CPU_RUNNING;
-		SetStateLocked(CPU_STEPPING);
+    was_unpaused = s_state == State::Running;
+    SetStateLocked(State::Stepping);
 
-		// FIXME: MsgHandler can cause this to deadlock the GUI Thread. Remove the timeout.
-		bool success = s_state_cpu_idle_cvar.wait_for(state_lock, std::chrono::seconds(10), []
-		{
-			return !s_state_cpu_thread_active;
-		});
-		if (!success)
-			NOTICE_LOG(POWERPC, "Abandoned CPU Thread synchronization in CPU::PauseAndLock! We'll probably crash now.");
+    while (s_state_cpu_thread_active)
+    {
+      s_state_cpu_idle_cvar.wait(state_lock);
+    }
 
-		if (control_adjacent)
-			RunAdjacentSystems(false);
-		state_lock.unlock();
+    if (control_adjacent)
+      RunAdjacentSystems(false);
+    state_lock.unlock();
 
-		// NOTE: It would make more sense for Core::DeclareAsCPUThread() to keep a
-		//   depth counter instead of being a boolean.
-		if (!Core::IsCPUThread())
-		{
-			s_have_fake_cpu_thread = true;
-			Core::DeclareAsCPUThread();
-		}
-	}
-	else
-	{
-		// Only need the stepping lock for this
-		if (s_have_fake_cpu_thread)
-		{
-			s_have_fake_cpu_thread = false;
-			Core::UndeclareAsCPUThread();
-		}
+    // NOTE: It would make more sense for Core::DeclareAsCPUThread() to keep a
+    //   depth counter instead of being a boolean.
+    if (!Core::IsCPUThread())
+    {
+      s_have_fake_cpu_thread = true;
+      Core::DeclareAsCPUThread();
+    }
+  }
+  else
+  {
+    // Only need the stepping lock for this
+    if (s_have_fake_cpu_thread)
+    {
+      s_have_fake_cpu_thread = false;
+      Core::UndeclareAsCPUThread();
+    }
 
-		{
-			std::lock_guard<std::mutex> state_lock(s_state_change_lock);
-			if (s_state_system_request_stepping)
-			{
-				s_state_system_request_stepping = false;
-			}
-			else if (unpause_on_unlock && SetStateLocked(CPU_RUNNING))
-			{
-				was_unpaused = true;
-			}
-			s_state_paused_and_locked = false;
-			s_state_cpu_cvar.notify_one();
+    {
+      std::lock_guard state_lock(s_state_change_lock);
+      if (s_state_system_request_stepping)
+      {
+        s_state_system_request_stepping = false;
+      }
+      else if (unpause_on_unlock && SetStateLocked(State::Running))
+      {
+        was_unpaused = true;
+      }
+      s_state_paused_and_locked = false;
+      s_state_cpu_cvar.notify_one();
 
-			if (control_adjacent)
-				RunAdjacentSystems(s_state == CPU_RUNNING);
-		}
-		s_stepping_lock.unlock();
-	}
-	return was_unpaused;
+      if (control_adjacent)
+        RunAdjacentSystems(s_state == State::Running);
+    }
+    s_stepping_lock.unlock();
+  }
+  return was_unpaused;
 }
 
+void AddCPUThreadJob(std::function<void()> function)
+{
+  std::unique_lock state_lock(s_state_change_lock);
+  s_pending_jobs.push(std::move(function));
 }
+
+}  // namespace CPU

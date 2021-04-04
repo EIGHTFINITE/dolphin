@@ -1,110 +1,284 @@
 package org.dolphinemu.dolphinemu.ui.main;
 
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.Uri;
 
-import android.database.Cursor;
+import androidx.appcompat.app.AlertDialog;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
-import org.dolphinemu.dolphinemu.DolphinApplication;
-import org.dolphinemu.dolphinemu.NativeLibrary;
+import org.dolphinemu.dolphinemu.BuildConfig;
 import org.dolphinemu.dolphinemu.R;
-import org.dolphinemu.dolphinemu.model.GameDatabase;
-import org.dolphinemu.dolphinemu.utils.SettingsFile;
+import org.dolphinemu.dolphinemu.features.settings.model.BooleanSetting;
+import org.dolphinemu.dolphinemu.features.settings.ui.MenuTag;
+import org.dolphinemu.dolphinemu.model.GameFileCache;
+import org.dolphinemu.dolphinemu.services.GameFileCacheService;
+import org.dolphinemu.dolphinemu.utils.AfterDirectoryInitializationRunner;
+import org.dolphinemu.dolphinemu.utils.BooleanSupplier;
+import org.dolphinemu.dolphinemu.utils.CompletableFuture;
+import org.dolphinemu.dolphinemu.utils.ContentHandler;
+import org.dolphinemu.dolphinemu.utils.FileBrowserHelper;
+import org.dolphinemu.dolphinemu.utils.WiiUtils;
 
-import rx.android.schedulers.AndroidSchedulers;
-import rx.functions.Action1;
-import rx.schedulers.Schedulers;
+import java.util.Arrays;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Supplier;
 
 public final class MainPresenter
 {
-	public static final int REQUEST_ADD_DIRECTORY = 1;
-	public static final int REQUEST_EMULATE_GAME = 2;
+  public static final int REQUEST_DIRECTORY = 1;
+  public static final int REQUEST_GAME_FILE = 2;
+  public static final int REQUEST_SD_FILE = 3;
+  public static final int REQUEST_WAD_FILE = 4;
+  public static final int REQUEST_WII_SAVE_FILE = 5;
 
-	private final MainView mView;
+  private static boolean sShouldRescanLibrary = true;
 
-	public MainPresenter(MainView view)
-	{
-		mView = view;
-	}
+  private final MainView mView;
+  private final Context mContext;
+  private BroadcastReceiver mBroadcastReceiver = null;
+  private String mDirToAdd;
 
-	public void onCreate()
-	{
-		// TODO Rather than calling into native code, this should use the commented line below.
-		// String versionName = BuildConfig.VERSION_NAME;
-		String versionName = NativeLibrary.GetVersionString();
-		mView.setVersionString(versionName);
-	}
+  public MainPresenter(MainView view, Context context)
+  {
+    mView = view;
+    mContext = context;
+  }
 
-	public void onFabClick()
-	{
-		mView.launchFileListActivity();
-	}
+  public void onCreate()
+  {
+    String versionName = BuildConfig.VERSION_NAME;
+    mView.setVersionString(versionName);
 
-	public boolean handleOptionSelection(int itemId)
-	{
-		switch (itemId)
-		{
-			case R.id.menu_settings_core:
-				mView.launchSettingsActivity(SettingsFile.FILE_NAME_DOLPHIN);
-				return true;
+    IntentFilter filter = new IntentFilter();
+    filter.addAction(GameFileCacheService.CACHE_UPDATED);
+    filter.addAction(GameFileCacheService.DONE_LOADING);
+    mBroadcastReceiver = new BroadcastReceiver()
+    {
+      @Override
+      public void onReceive(Context context, Intent intent)
+      {
+        switch (intent.getAction())
+        {
+          case GameFileCacheService.CACHE_UPDATED:
+            mView.showGames();
+            break;
+          case GameFileCacheService.DONE_LOADING:
+            mView.setRefreshing(false);
+            break;
+        }
+      }
+    };
+    LocalBroadcastManager.getInstance(mContext).registerReceiver(mBroadcastReceiver, filter);
+  }
 
-			case R.id.menu_settings_video:
-				mView.launchSettingsActivity(SettingsFile.FILE_NAME_GFX);
-				return true;
+  public void onDestroy()
+  {
+    if (mBroadcastReceiver != null)
+    {
+      LocalBroadcastManager.getInstance(mContext).unregisterReceiver(mBroadcastReceiver);
+    }
+  }
 
-			case R.id.menu_settings_gcpad:
-				mView.launchSettingsActivity(SettingsFile.FILE_NAME_GCPAD);
-				return true;
+  public void onFabClick()
+  {
+    mView.launchFileListActivity();
+  }
 
-			case R.id.menu_settings_wiimote:
-				mView.launchSettingsActivity(SettingsFile.FILE_NAME_WIIMOTE);
-				return true;
+  public boolean handleOptionSelection(int itemId, Context context)
+  {
+    switch (itemId)
+    {
+      case R.id.menu_settings:
+        mView.launchSettingsActivity(MenuTag.SETTINGS);
+        return true;
 
-			case R.id.menu_refresh:
-				GameDatabase databaseHelper = DolphinApplication.databaseHelper;
-				databaseHelper.scanLibrary(databaseHelper.getWritableDatabase());
-				mView.refresh();
-				return true;
+      case R.id.menu_refresh:
+        mView.setRefreshing(true);
+        GameFileCacheService.startRescan(context);
+        return true;
 
-			case R.id.button_add_directory:
-				mView.launchFileListActivity();
-				return true;
-		}
+      case R.id.button_add_directory:
+        mView.launchFileListActivity();
+        return true;
 
-		return false;
-	}
+      case R.id.menu_open_file:
+        mView.launchOpenFileActivity(REQUEST_GAME_FILE);
+        return true;
 
-	public void handleActivityResult(int requestCode, int resultCode)
-	{
-		switch (requestCode)
-		{
-			case REQUEST_ADD_DIRECTORY:
-				// If the user picked a file, as opposed to just backing out.
-				if (resultCode == MainActivity.RESULT_OK)
-				{
-					mView.refresh();
-				}
-				break;
+      case R.id.menu_install_wad:
+        new AfterDirectoryInitializationRunner().run(context, true,
+                () -> mView.launchOpenFileActivity(REQUEST_WAD_FILE));
+        return true;
 
-			case REQUEST_EMULATE_GAME:
-				mView.refreshFragmentScreenshot(resultCode);
-				break;
-		}
-	}
+      case R.id.menu_import_wii_save:
+        new AfterDirectoryInitializationRunner().run(context, true,
+                () -> mView.launchOpenFileActivity(REQUEST_WII_SAVE_FILE));
+        return true;
+    }
 
-	public void loadGames(final int platformIndex)
-	{
-		GameDatabase databaseHelper = DolphinApplication.databaseHelper;
+    return false;
+  }
 
-		databaseHelper.getGamesForPlatform(platformIndex)
-				.subscribeOn(Schedulers.io())
-				.observeOn(AndroidSchedulers.mainThread())
-				.subscribe(new Action1<Cursor>()
-						   {
-							   @Override
-							   public void call(Cursor games)
-							   {
-								   mView.showGames(platformIndex, games);
-							   }
-						   }
-				);
-	}
+  public void onResume()
+  {
+    if (mDirToAdd != null)
+    {
+      GameFileCache.addGameFolder(mDirToAdd);
+      mDirToAdd = null;
+    }
+
+    if (sShouldRescanLibrary && !GameFileCacheService.isRescanning())
+    {
+      new AfterDirectoryInitializationRunner().run(mContext, false, () ->
+      {
+        mView.setRefreshing(true);
+        GameFileCacheService.startRescan(mContext);
+      });
+    }
+
+    sShouldRescanLibrary = true;
+  }
+
+  /**
+   * Called when a selection is made using the legacy folder picker.
+   */
+  public void onDirectorySelected(String dir)
+  {
+    mDirToAdd = dir;
+  }
+
+  /**
+   * Called when a selection is made using the Storage Access Framework folder picker.
+   */
+  public void onDirectorySelected(Intent result)
+  {
+    Uri uri = result.getData();
+
+    boolean recursive = BooleanSetting.MAIN_RECURSIVE_ISO_PATHS.getBooleanGlobal();
+    String[] childNames = ContentHandler.getChildNames(uri, recursive);
+    if (Arrays.stream(childNames).noneMatch((name) -> FileBrowserHelper.GAME_EXTENSIONS.contains(
+            FileBrowserHelper.getExtension(name, false))))
+    {
+      AlertDialog.Builder builder = new AlertDialog.Builder(mContext, R.style.DolphinDialogBase);
+      builder.setMessage(mContext.getString(R.string.wrong_file_extension_in_directory,
+              FileBrowserHelper.setToSortedDelimitedString(FileBrowserHelper.GAME_EXTENSIONS)));
+      builder.setPositiveButton(R.string.ok, null);
+      builder.show();
+    }
+
+    ContentResolver contentResolver = mContext.getContentResolver();
+    Uri canonicalizedUri = contentResolver.canonicalize(uri);
+    if (canonicalizedUri != null)
+      uri = canonicalizedUri;
+
+    int takeFlags = result.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+    mContext.getContentResolver().takePersistableUriPermission(uri, takeFlags);
+
+    mDirToAdd = uri.toString();
+  }
+
+  public void installWAD(String path)
+  {
+    runOnThreadAndShowResult(R.string.import_in_progress, () ->
+    {
+      boolean success = WiiUtils.installWAD(path);
+      int message = success ? R.string.wad_install_success : R.string.wad_install_failure;
+      return mContext.getResources().getString(message);
+    });
+  }
+
+  public void importWiiSave(String path)
+  {
+    final Activity mainPresenterActivity = (Activity) mContext;
+
+    CompletableFuture<Boolean> canOverwriteFuture = new CompletableFuture<>();
+
+    runOnThreadAndShowResult(R.string.import_in_progress, () ->
+    {
+      BooleanSupplier canOverwrite = () ->
+      {
+        mainPresenterActivity.runOnUiThread(() ->
+        {
+          AlertDialog.Builder builder =
+                  new AlertDialog.Builder(mContext, R.style.DolphinDialogBase);
+          builder.setMessage(R.string.wii_save_exists);
+          builder.setCancelable(false);
+          builder.setPositiveButton(R.string.yes, (dialog, i) -> canOverwriteFuture.complete(true));
+          builder.setNegativeButton(R.string.no, (dialog, i) -> canOverwriteFuture.complete(false));
+          builder.show();
+        });
+
+        try
+        {
+          return canOverwriteFuture.get();
+        }
+        catch (ExecutionException | InterruptedException e)
+        {
+          // Shouldn't happen
+          throw new RuntimeException(e);
+        }
+      };
+
+      int result = WiiUtils.importWiiSave(path, canOverwrite);
+
+      int message;
+      switch (result)
+      {
+        case WiiUtils.RESULT_SUCCESS:
+          message = R.string.wii_save_import_success;
+          break;
+        case WiiUtils.RESULT_CORRUPTED_SOURCE:
+          message = R.string.wii_save_import_corruped_source;
+          break;
+        case WiiUtils.RESULT_TITLE_MISSING:
+          message = R.string.wii_save_import_title_missing;
+          break;
+        case WiiUtils.RESULT_CANCELLED:
+          return null;
+        default:
+          message = R.string.wii_save_import_error;
+          break;
+      }
+      return mContext.getResources().getString(message);
+    });
+  }
+
+  private void runOnThreadAndShowResult(int progressMessage, Supplier<String> f)
+  {
+    final Activity mainPresenterActivity = (Activity) mContext;
+
+    AlertDialog progressDialog = new AlertDialog.Builder(mContext, R.style.DolphinDialogBase)
+            .create();
+    progressDialog.setTitle(progressMessage);
+    progressDialog.setCancelable(false);
+    progressDialog.show();
+
+    new Thread(() ->
+    {
+      String result = f.get();
+      mainPresenterActivity.runOnUiThread(() ->
+      {
+        progressDialog.dismiss();
+
+        if (result != null)
+        {
+          AlertDialog.Builder builder =
+                  new AlertDialog.Builder(mContext, R.style.DolphinDialogBase);
+          builder.setMessage(result);
+          builder.setPositiveButton(R.string.ok, (dialog, i) -> dialog.dismiss());
+          builder.show();
+        }
+      });
+    }, mContext.getResources().getString(progressMessage)).start();
+  }
+
+  public static void skipRescanningLibrary()
+  {
+    sShouldRescanLibrary = false;
+  }
 }

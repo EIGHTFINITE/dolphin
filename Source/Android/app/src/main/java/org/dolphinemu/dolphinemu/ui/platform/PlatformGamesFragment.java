@@ -1,102 +1,125 @@
 package org.dolphinemu.dolphinemu.ui.platform;
 
-import android.app.Fragment;
-import android.database.Cursor;
 import android.os.Bundle;
-import android.support.annotation.Nullable;
-import android.support.v7.widget.GridLayoutManager;
-import android.support.v7.widget.RecyclerView;
+import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 
-import org.dolphinemu.dolphinemu.BuildConfig;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.fragment.app.Fragment;
+import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+
 import org.dolphinemu.dolphinemu.R;
 import org.dolphinemu.dolphinemu.adapters.GameAdapter;
+import org.dolphinemu.dolphinemu.services.GameFileCacheService;
 
 public final class PlatformGamesFragment extends Fragment implements PlatformGamesView
 {
-	private static final String ARG_PLATFORM = BuildConfig.APPLICATION_ID + ".PLATFORM";
+  private static final String ARG_PLATFORM = "platform";
 
-	private PlatformGamesPresenter mPresenter = new PlatformGamesPresenter(this);
+  private GameAdapter mAdapter;
+  private RecyclerView mRecyclerView;
+  private SwipeRefreshLayout mSwipeRefresh;
+  private SwipeRefreshLayout.OnRefreshListener mOnRefreshListener;
 
-	private GameAdapter mAdapter;
-	private RecyclerView mRecyclerView;
+  public static PlatformGamesFragment newInstance(Platform platform)
+  {
+    PlatformGamesFragment fragment = new PlatformGamesFragment();
 
-	public static PlatformGamesFragment newInstance(int platform)
-	{
-		PlatformGamesFragment fragment = new PlatformGamesFragment();
+    Bundle args = new Bundle();
+    args.putSerializable(ARG_PLATFORM, platform);
 
-		Bundle args = new Bundle();
-		args.putInt(ARG_PLATFORM, platform);
+    fragment.setArguments(args);
+    return fragment;
+  }
 
-		fragment.setArguments(args);
-		return fragment;
-	}
+  @Override
+  public void onCreate(Bundle savedInstanceState)
+  {
+    super.onCreate(savedInstanceState);
+  }
 
-	@Override
-	public void onCreate(Bundle savedInstanceState)
-	{
-		super.onCreate(savedInstanceState);
+  @Override
+  public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState)
+  {
+    View rootView = inflater.inflate(R.layout.fragment_grid, container, false);
 
-		mPresenter.onCreate(getArguments().getInt(ARG_PLATFORM));
-	}
+    findViews(rootView);
 
-	@Nullable
-	@Override
-	public View onCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState)
-	{
-		View rootView = inflater.inflate(R.layout.fragment_grid, container, false);
+    return rootView;
+  }
 
-		findViews(rootView);
+  @Override
+  public void onViewCreated(@NonNull View view, Bundle savedInstanceState)
+  {
+    int columns = getResources().getInteger(R.integer.game_grid_columns);
+    RecyclerView.LayoutManager layoutManager = new GridLayoutManager(getActivity(), columns);
+    mAdapter = new GameAdapter();
 
-		mPresenter.onCreateView();
+    TypedValue typedValue = new TypedValue();
+    requireActivity().getTheme().resolveAttribute(R.attr.colorPrimary, typedValue, true);
+    mSwipeRefresh.setColorSchemeColors(typedValue.data);
 
-		return rootView;
-	}
+    mSwipeRefresh.setOnRefreshListener(mOnRefreshListener);
 
-	@Override
-	public void onViewCreated(View view, Bundle savedInstanceState)
-	{
-		int columns = getResources().getInteger(R.integer.game_grid_columns);
-		RecyclerView.LayoutManager layoutManager = new GridLayoutManager(getActivity(), columns);
-		mAdapter = new GameAdapter();
+    mRecyclerView.setLayoutManager(layoutManager);
+    mRecyclerView.setAdapter(mAdapter);
 
-		mRecyclerView.setLayoutManager(layoutManager);
-		mRecyclerView.setAdapter(mAdapter);
+    mRecyclerView.addItemDecoration(new GameAdapter.SpacesItemDecoration(8));
 
-		mRecyclerView.addItemDecoration(new GameAdapter.SpacesItemDecoration(8));
-	}
+    setRefreshing(GameFileCacheService.isLoading());
 
-	@Override
-	public void refreshScreenshotAtPosition(int position)
-	{
-		mAdapter.notifyItemChanged(position);
-	}
+    showGames();
+  }
 
-	@Override
-	public void refresh()
-	{
-		mPresenter.refresh();
-	}
+  @Override
+  public void refreshScreenshotAtPosition(int position)
+  {
+    mAdapter.notifyItemChanged(position);
+  }
 
-	@Override
-	public void onItemClick(String gameId)
-	{
-		// No-op for now
-	}
+  @Override
+  public void onItemClick(String gameId)
+  {
+    // No-op for now
+  }
 
-	@Override
-	public void showGames(Cursor games)
-	{
-		if (mAdapter != null)
-		{
-			mAdapter.swapCursor(games);
-		}
-	}
+  @Override
+  public void showGames()
+  {
+    if (mAdapter != null)
+    {
+      Platform platform = (Platform) getArguments().getSerializable(ARG_PLATFORM);
+      mAdapter.swapDataSet(GameFileCacheService.getGameFilesForPlatform(platform));
+    }
+  }
 
-	private void findViews(View root)
-	{
-		mRecyclerView = (RecyclerView) root.findViewById(R.id.grid_games);
-	}
+  @Override
+  public void refetchMetadata()
+  {
+    mAdapter.refetchMetadata();
+  }
+
+  public void setOnRefreshListener(@Nullable SwipeRefreshLayout.OnRefreshListener listener)
+  {
+    mOnRefreshListener = listener;
+
+    if (mSwipeRefresh != null)
+      mSwipeRefresh.setOnRefreshListener(listener);
+  }
+
+  public void setRefreshing(boolean refreshing)
+  {
+    mSwipeRefresh.setRefreshing(refreshing);
+  }
+
+  private void findViews(View root)
+  {
+    mSwipeRefresh = root.findViewById(R.id.swipe_refresh);
+    mRecyclerView = root.findViewById(R.id.grid_games);
+  }
 }

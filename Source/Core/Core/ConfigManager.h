@@ -4,313 +4,371 @@
 
 #pragma once
 
+#include <limits>
+#include <optional>
+#include <set>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
-#include "Common/IniFile.h"
-#include "Common/NonCopyable.h"
-#include "Common/SysConf.h"
-#include "Core/HW/EXI_Device.h"
-#include "Core/HW/SI_Device.h"
-#include "DiscIO/Volume.h"
+#include "Common/Common.h"
+#include "Common/CommonTypes.h"
+
+class IniFile;
+
+namespace DiscIO
+{
+enum class Language;
+enum class Platform;
+enum class Region;
+struct Partition;
+class Volume;
+}  // namespace DiscIO
+
+namespace ExpansionInterface
+{
+enum TEXIDevices : int;
+}  // namespace ExpansionInterface
+
+namespace IOS::ES
+{
+class TMDReader;
+}  // namespace IOS::ES
+
+namespace PowerPC
+{
+enum class CPUCore;
+}  // namespace PowerPC
+
+namespace SerialInterface
+{
+enum SIDevices : int;
+}  // namespace SerialInterface
+
+struct BootParameters;
 
 // DSP Backend Types
-#define BACKEND_NULLSOUND   _trans("No audio output")
-#define BACKEND_ALSA        "ALSA"
-#define BACKEND_AOSOUND     "AOSound"
-#define BACKEND_COREAUDIO   "CoreAudio"
-#define BACKEND_OPENAL      "OpenAL"
-#define BACKEND_PULSEAUDIO  "Pulse"
-#define BACKEND_XAUDIO2     "XAudio2"
-#define BACKEND_OPENSLES    "OpenSLES"
+#define BACKEND_NULLSOUND _trans("No Audio Output")
+#define BACKEND_ALSA "ALSA"
+#define BACKEND_CUBEB "Cubeb"
+#define BACKEND_OPENAL "OpenAL"
+#define BACKEND_PULSEAUDIO "Pulse"
+#define BACKEND_OPENSLES "OpenSLES"
+#define BACKEND_WASAPI _trans("WASAPI (Exclusive Mode)")
 
-enum GPUDeterminismMode
+enum class GPUDeterminismMode
 {
-	GPU_DETERMINISM_AUTO,
-	GPU_DETERMINISM_NONE,
-	// This is currently the only mode.  There will probably be at least
-	// one more at some point.
-	GPU_DETERMINISM_FAKE_COMPLETION,
+  Auto,
+  Disabled,
+  // This is currently the only mode.  There will probably be at least
+  // one more at some point.
+  FakeCompletion,
 };
 
-struct SConfig : NonCopyable
+struct SConfig
 {
-	// Wii Devices
-	bool m_WiiSDCard;
-	bool m_WiiKeyboard;
-	bool m_WiimoteContinuousScanning;
-	bool m_WiimoteEnableSpeaker;
+  // Wii Devices
+  bool m_WiiSDCard;
+  bool m_WiiKeyboard;
+  bool m_WiimoteContinuousScanning;
+  bool m_WiimoteEnableSpeaker;
+  bool connect_wiimotes_for_ciface;
 
-	// name of the last used filename
-	std::string m_LastFilename;
+  // ISO folder
+  std::vector<std::string> m_ISOFolder;
 
-	// ISO folder
-	std::vector<std::string> m_ISOFolder;
-	bool m_RecursiveISOFolder;
+  // Settings
+  bool bEnableDebugging = false;
+#ifdef USE_GDBSTUB
+  int iGDBPort;
+#ifndef _WIN32
+  std::string gdb_socket;
+#endif
+#endif
+  bool bAutomaticStart = false;
+  bool bBootToPause = false;
 
-	// Settings
-	bool bEnableDebugging;
-	#ifdef USE_GDBSTUB
-	int iGDBPort;
-	#ifndef _WIN32
-	std::string gdb_socket;
-	#endif
-	#endif
-	bool bAutomaticStart;
-	bool bBootToPause;
+  PowerPC::CPUCore cpu_core;
 
-	int iCPUCore;
+  bool bJITFollowBranch;
+  bool bJITNoBlockCache = false;
+  bool bJITNoBlockLinking = false;
+  bool bJITOff = false;
+  bool bJITLoadStoreOff = false;
+  bool bJITLoadStorelXzOff = false;
+  bool bJITLoadStorelwzOff = false;
+  bool bJITLoadStorelbzxOff = false;
+  bool bJITLoadStoreFloatingOff = false;
+  bool bJITLoadStorePairedOff = false;
+  bool bJITFloatingPointOff = false;
+  bool bJITIntegerOff = false;
+  bool bJITPairedOff = false;
+  bool bJITSystemRegistersOff = false;
+  bool bJITBranchOff = false;
+  bool bJITRegisterCacheOff = false;
 
-	// JIT (shared between JIT and JITIL)
-	bool bJITNoBlockCache, bJITNoBlockLinking;
-	bool bJITOff;
-	bool bJITLoadStoreOff, bJITLoadStorelXzOff, bJITLoadStorelwzOff, bJITLoadStorelbzxOff;
-	bool bJITLoadStoreFloatingOff;
-	bool bJITLoadStorePairedOff;
-	bool bJITFloatingPointOff;
-	bool bJITIntegerOff;
-	bool bJITPairedOff;
-	bool bJITSystemRegistersOff;
-	bool bJITBranchOff;
-	bool bJITILTimeProfiling;
-	bool bJITILOutputIR;
+  bool bFastmem;
+  bool bFPRF = false;
+  bool bAccurateNaNs = false;
 
-	bool bFastmem;
-	bool bFPRF;
-	bool bAccurateNaNs;
+  int iTimingVariance = 40;  // in milli secounds
+  bool bCPUThread = true;
+  bool bDSPThread = false;
+  bool bDSPHLE = true;
+  bool bSyncGPUOnSkipIdleHack = true;
+  bool bHLE_BS2 = true;
+  bool bEnableCheats = false;
+  bool bEnableMemcardSdWriting = true;
+  bool bCopyWiiSaveNetplay = true;
 
-	int iTimingVariance; // in milli secounds
-	bool bCPUThread;
-	bool bDSPThread;
-	bool bDSPHLE;
-	bool bSkipIdle;
-	bool bSyncGPUOnSkipIdleHack;
-	bool bNTSC;
-	bool bForceNTSCJ;
-	bool bHLE_BS2;
-	bool bEnableCheats;
-	bool bEnableMemcardSdWriting;
+  bool bDPL2Decoder = false;
+  int iLatency = 20;
+  bool m_audio_stretch = false;
+  int m_audio_stretch_max_latency = 80;
 
-	bool bDPL2Decoder;
-	int iLatency;
+  bool bRunCompareServer = false;
+  bool bRunCompareClient = false;
 
-	bool bRunCompareServer;
-	bool bRunCompareClient;
+  bool bMMU = false;
+  bool bLowDCBZHack = false;
+  int iBBDumpPort = 0;
+  bool bFastDiscSpeed = false;
 
-	bool bMMU;
-	bool bDCBZOFF;
-	int iBBDumpPort;
-	bool bFastDiscSpeed;
+  bool bSyncGPU = false;
+  int iSyncGpuMaxDistance;
+  int iSyncGpuMinDistance;
+  float fSyncGpuOverclock;
 
-	bool bSyncGPU;
-	int iSyncGpuMaxDistance;
-	int iSyncGpuMinDistance;
-	float fSyncGpuOverclock;
+  int SelectedLanguage = 0;
+  bool bOverrideRegionSettings = false;
 
-	int SelectedLanguage;
-	bool bOverrideGCLanguage;
+  bool bWii = false;
+  bool m_is_mios = false;
 
-	bool bWii;
+  // Interface settings
+  bool bConfirmStop = false;
+  bool bHideCursor = false;
+  std::string theme_name;
 
-	// Interface settings
-	bool bConfirmStop, bHideCursor, bAutoHideCursor, bUsePanicHandlers, bOnScreenDisplayMessages;
-	std::string theme_name;
+  // Bluetooth passthrough mode settings
+  bool m_bt_passthrough_enabled = false;
+  int m_bt_passthrough_pid = -1;
+  int m_bt_passthrough_vid = -1;
+  std::string m_bt_passthrough_link_keys;
 
-	// Display settings
-	std::string strFullscreenResolution;
-	int iRenderWindowXPos, iRenderWindowYPos;
-	int iRenderWindowWidth, iRenderWindowHeight;
-	bool bRenderWindowAutoSize, bKeepWindowOnTop;
-	bool bFullscreen, bRenderToMain;
-	bool bProgressive, bPAL60;
-	bool bDisableScreenSaver;
+  // USB passthrough settings
+  std::set<std::pair<u16, u16>> m_usb_passthrough_devices;
+  bool IsUSBDeviceWhitelisted(std::pair<u16, u16> vid_pid) const;
 
-	int iPosX, iPosY, iWidth, iHeight;
+  // Fifo Player related settings
+  bool bLoopFifoReplay = true;
 
-	// Analytics settings.
-	std::string m_analytics_id;
-	bool m_analytics_enabled;
-	bool m_analytics_permission_asked;
+  // Custom RTC
+  bool bEnableCustomRTC;
+  u32 m_customRTCValue;
 
-	// Fifo Player related settings
-	bool bLoopFifoReplay;
+  // DPL2
+  bool ShouldUseDPL2Decoder() const;
 
-	enum EBootBS2
-	{
-		BOOT_DEFAULT,
-		BOOT_BS2_JAP,
-		BOOT_BS2_USA,
-		BOOT_BS2_EUR,
-	};
+  DiscIO::Region m_region;
 
-	enum EBootType
-	{
-		BOOT_ISO,
-		BOOT_ELF,
-		BOOT_DOL,
-		BOOT_WII_NAND,
-		BOOT_BS2,
-		BOOT_DFF
-	};
-	EBootType m_BootType;
+  std::string m_strGPUDeterminismMode;
 
-	std::string m_strVideoBackend;
-	std::string m_strGPUDeterminismMode;
+  // set based on the string version
+  GPUDeterminismMode m_GPUDeterminismMode;
 
-	// set based on the string version
-	GPUDeterminismMode m_GPUDeterminismMode;
+  // files
+  std::string m_strBootROM;
+  std::string m_strSRAM;
 
-	// files
-	std::string m_strFilename;
-	std::string m_strBootROM;
-	std::string m_strSRAM;
-	std::string m_strDefaultISO;
-	std::string m_strDVDRoot;
-	std::string m_strApploader;
-	std::string m_strUniqueID;
-	std::string m_strName;
-	u16 m_revision;
+  std::string m_perfDir;
 
-	std::string m_perfDir;
+  std::string m_debugger_game_id;
+  // TODO: remove this as soon as the ticket view hack in IOS/ES/Views is dropped.
+  bool m_disc_booted_from_game_list = false;
 
-	void LoadDefaults();
-	bool AutoSetup(EBootBS2 _BootBS2);
-	const std::string &GetUniqueID() const { return m_strUniqueID; }
-	void CheckMemcardPath(std::string& memcardPath, const std::string& gameRegion, bool isSlotA);
-	DiscIO::IVolume::ELanguage GetCurrentLanguage(bool wii) const;
+  const std::string& GetGameID() const { return m_game_id; }
+  const std::string& GetTitleName() const { return m_title_name; }
+  const std::string& GetTitleDescription() const { return m_title_description; }
+  u64 GetTitleID() const { return m_title_id; }
+  u16 GetRevision() const { return m_revision; }
+  void ResetRunningGameMetadata();
+  void SetRunningGameMetadata(const DiscIO::Volume& volume, const DiscIO::Partition& partition);
+  void SetRunningGameMetadata(const IOS::ES::TMDReader& tmd, DiscIO::Platform platform);
+  void SetRunningGameMetadata(const std::string& game_id);
+  // Reloads title-specific map files, patches, custom textures, etc.
+  // This should only be called after the new title has been loaded into memory.
+  static void OnNewTitleLoad();
 
-	IniFile LoadDefaultGameIni() const;
-	IniFile LoadLocalGameIni() const;
-	IniFile LoadGameIni() const;
+  void LoadDefaults();
+  static std::string MakeGameID(std::string_view file_name);
+  // Replaces NTSC-K with some other region, and doesn't replace non-NTSC-K regions
+  static DiscIO::Region ToGameCubeRegion(DiscIO::Region region);
+  // The region argument must be valid for GameCube (i.e. must not be NTSC-K)
+  static const char* GetDirectoryForRegion(DiscIO::Region region);
+  std::string GetBootROMPath(const std::string& region_directory) const;
+  bool SetPathsAndGameMetadata(const BootParameters& boot);
+  static DiscIO::Region GetFallbackRegion();
+  DiscIO::Language GetCurrentLanguage(bool wii) const;
+  DiscIO::Language GetLanguageAdjustedForRegion(bool wii, DiscIO::Region region) const;
 
-	static IniFile LoadDefaultGameIni(const std::string& id, u16 revision);
-	static IniFile LoadLocalGameIni(const std::string& id, u16 revision);
-	static IniFile LoadGameIni(const std::string& id, u16 revision);
+  IniFile LoadDefaultGameIni() const;
+  IniFile LoadLocalGameIni() const;
+  IniFile LoadGameIni() const;
 
-	static std::vector<std::string> GetGameIniFilenames(const std::string& id, u16 revision);
+  static IniFile LoadDefaultGameIni(const std::string& id, std::optional<u16> revision);
+  static IniFile LoadLocalGameIni(const std::string& id, std::optional<u16> revision);
+  static IniFile LoadGameIni(const std::string& id, std::optional<u16> revision);
 
-	std::string m_NANDPath;
+  std::string m_strGbaCartA;
+  std::string m_strGbaCartB;
+  ExpansionInterface::TEXIDevices m_EXIDevice[3];
+  SerialInterface::SIDevices m_SIDevice[4];
 
-	std::string m_strMemoryCardA;
-	std::string m_strMemoryCardB;
-	std::string m_strGbaCartA;
-	std::string m_strGbaCartB;
-	TEXIDevices m_EXIDevice[3];
-	SIDevices m_SIDevice[4];
-	std::string m_bba_mac;
+  std::string m_bba_mac;
+  std::string m_bba_xlink_ip;
+  bool m_bba_xlink_chat_osd = true;
 
-	// interface language
-	int m_InterfaceLanguage;
-	float m_EmulationSpeed;
-	bool m_OCEnable;
-	float m_OCFactor;
-	// other interface settings
-	bool m_InterfaceToolbar;
-	bool m_InterfaceStatusbar;
-	bool m_InterfaceLogWindow;
-	bool m_InterfaceLogConfigWindow;
-	bool m_InterfaceExtendedFPSInfo;
+  // interface language
+  std::string m_InterfaceLanguage;
+  float m_EmulationSpeed;
+  bool m_OCEnable;
+  float m_OCFactor;
+  // other interface settings
+  bool m_InterfaceExtendedFPSInfo;
+  bool m_show_active_title = false;
+  bool m_use_builtin_title_database = true;
 
-	bool m_ListDrives;
-	bool m_ListWad;
-	bool m_ListElfDol;
-	bool m_ListWii;
-	bool m_ListGC;
-	bool m_ListPal;
-	bool m_ListUsa;
-	bool m_ListJap;
-	bool m_ListAustralia;
-	bool m_ListFrance;
-	bool m_ListGermany;
-	bool m_ListItaly;
-	bool m_ListKorea;
-	bool m_ListNetherlands;
-	bool m_ListRussia;
-	bool m_ListSpain;
-	bool m_ListTaiwan;
-	bool m_ListWorld;
-	bool m_ListUnknown;
-	int m_ListSort;
-	int m_ListSort2;
+  bool m_ListDrives;
+  bool m_ListWad;
+  bool m_ListElfDol;
+  bool m_ListWii;
+  bool m_ListGC;
+  bool m_ListPal;
+  bool m_ListUsa;
+  bool m_ListJap;
+  bool m_ListAustralia;
+  bool m_ListFrance;
+  bool m_ListGermany;
+  bool m_ListItaly;
+  bool m_ListKorea;
+  bool m_ListNetherlands;
+  bool m_ListRussia;
+  bool m_ListSpain;
+  bool m_ListTaiwan;
+  bool m_ListWorld;
+  bool m_ListUnknown;
+  int m_ListSort;
+  int m_ListSort2;
 
-	// Game list column toggles
-	bool m_showSystemColumn;
-	bool m_showBannerColumn;
-	bool m_showMakerColumn;
-	bool m_showFileNameColumn;
-	bool m_showIDColumn;
-	bool m_showRegionColumn;
-	bool m_showSizeColumn;
-	bool m_showStateColumn;
+  // Game list column toggles
+  bool m_showSystemColumn;
+  bool m_showBannerColumn;
+  bool m_showDescriptionColumn;
+  bool m_showTitleColumn;
+  bool m_showMakerColumn;
+  bool m_showFileNameColumn;
+  bool m_showFilePathColumn;
+  bool m_showIDColumn;
+  bool m_showRegionColumn;
+  bool m_showSizeColumn;
+  bool m_showFileFormatColumn;
+  bool m_showBlockSizeColumn;
+  bool m_showCompressionColumn;
+  bool m_showTagsColumn;
 
-	// Toggles whether compressed titles show up in blue in the game list
-	bool m_ColorCompressed;
+  std::string m_WirelessMac;
+  bool m_PauseMovie;
+  bool m_ShowLag;
+  bool m_ShowFrameCount;
+  bool m_ShowRTC;
+  std::string m_strMovieAuthor;
+  bool m_DumpFrames;
+  bool m_DumpFramesSilent;
+  bool m_ShowInputDisplay;
 
-	std::string m_WirelessMac;
-	bool m_PauseMovie;
-	bool m_ShowLag;
-	bool m_ShowFrameCount;
-	std::string m_strMovieAuthor;
-	unsigned int m_FrameSkip;
-	bool m_DumpFrames;
-	bool m_DumpFramesSilent;
-	bool m_ShowInputDisplay;
+  bool m_PauseOnFocusLost;
 
-	bool m_PauseOnFocusLost;
+  // DSP settings
+  bool m_DSPEnableJIT;
+  bool m_DSPCaptureLog;
+  bool m_DumpAudio;
+  bool m_DumpAudioSilent;
+  bool m_IsMuted;
+  bool m_DumpUCode;
+  int m_Volume;
+  std::string sBackend;
 
-	// DSP settings
-	bool m_DSPEnableJIT;
-	bool m_DSPCaptureLog;
-	bool m_DumpAudio;
-	bool m_IsMuted;
-	bool m_DumpUCode;
-	int m_Volume;
-	std::string sBackend;
+#ifdef _WIN32
+  // WSAPI settings
+  std::string sWASAPIDevice;
+#endif
 
-	// Input settings
-	bool m_BackgroundInput;
-	bool m_AdapterRumble[4];
-	bool m_AdapterKonga[4];
+  // Input settings
+  bool m_BackgroundInput;
+  bool m_AdapterRumble[4];
+  bool m_AdapterKonga[4];
 
-	SysConf* m_SYSCONF;
+  // Auto-update settings
+  std::string m_auto_update_track;
+  std::string m_auto_update_hash_override;
 
-	// Save settings
-	void SaveSettings();
+  SConfig(const SConfig&) = delete;
+  SConfig& operator=(const SConfig&) = delete;
+  SConfig(SConfig&&) = delete;
+  SConfig& operator=(SConfig&&) = delete;
 
-	// Load settings
-	void LoadSettings();
+  // Save settings
+  void SaveSettings();
 
-	// Return the permanent and somewhat globally used instance of this struct
-	static SConfig& GetInstance() { return(*m_Instance); }
+  // Load settings
+  void LoadSettings();
 
-	static void Init();
-	static void Shutdown();
+  // Return the permanent and somewhat globally used instance of this struct
+  static SConfig& GetInstance() { return (*m_Instance); }
+  static void Init();
+  static void Shutdown();
 
 private:
-	SConfig();
-	~SConfig();
+  SConfig();
+  ~SConfig();
 
-	void SaveGeneralSettings(IniFile& ini);
-	void SaveInterfaceSettings(IniFile& ini);
-	void SaveDisplaySettings(IniFile& ini);
-	void SaveGameListSettings(IniFile& ini);
-	void SaveCoreSettings(IniFile& ini);
-	void SaveDSPSettings(IniFile& ini);
-	void SaveInputSettings(IniFile& ini);
-	void SaveMovieSettings(IniFile& ini);
-	void SaveFifoPlayerSettings(IniFile& ini);
-	void SaveAnalyticsSettings(IniFile& ini);
+  void SaveGeneralSettings(IniFile& ini);
+  void SaveInterfaceSettings(IniFile& ini);
+  void SaveGameListSettings(IniFile& ini);
+  void SaveCoreSettings(IniFile& ini);
+  void SaveDSPSettings(IniFile& ini);
+  void SaveInputSettings(IniFile& ini);
+  void SaveMovieSettings(IniFile& ini);
+  void SaveFifoPlayerSettings(IniFile& ini);
+  void SaveBluetoothPassthroughSettings(IniFile& ini);
+  void SaveUSBPassthroughSettings(IniFile& ini);
+  void SaveAutoUpdateSettings(IniFile& ini);
+  void SaveJitDebugSettings(IniFile& ini);
 
-	void LoadGeneralSettings(IniFile& ini);
-	void LoadInterfaceSettings(IniFile& ini);
-	void LoadDisplaySettings(IniFile& ini);
-	void LoadGameListSettings(IniFile& ini);
-	void LoadCoreSettings(IniFile& ini);
-	void LoadDSPSettings(IniFile& ini);
-	void LoadInputSettings(IniFile& ini);
-	void LoadMovieSettings(IniFile& ini);
-	void LoadFifoPlayerSettings(IniFile& ini);
-	void LoadAnalyticsSettings(IniFile& ini);
+  void LoadGeneralSettings(IniFile& ini);
+  void LoadInterfaceSettings(IniFile& ini);
+  void LoadGameListSettings(IniFile& ini);
+  void LoadCoreSettings(IniFile& ini);
+  void LoadDSPSettings(IniFile& ini);
+  void LoadInputSettings(IniFile& ini);
+  void LoadMovieSettings(IniFile& ini);
+  void LoadFifoPlayerSettings(IniFile& ini);
+  void LoadBluetoothPassthroughSettings(IniFile& ini);
+  void LoadUSBPassthroughSettings(IniFile& ini);
+  void LoadAutoUpdateSettings(IniFile& ini);
+  void LoadJitDebugSettings(IniFile& ini);
 
-	static SConfig* m_Instance;
+  void SetRunningGameMetadata(const std::string& game_id, const std::string& gametdb_id,
+                              u64 title_id, u16 revision, DiscIO::Region region);
+
+  static SConfig* m_Instance;
+
+  std::string m_game_id;
+  std::string m_gametdb_id;
+  std::string m_title_name;
+  std::string m_title_description;
+  u64 m_title_id;
+  u16 m_revision;
 };

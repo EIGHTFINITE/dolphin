@@ -4,65 +4,69 @@
 
 #pragma once
 
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 #include "Core/FifoPlayer/FifoDataFile.h"
-#include "Core/FifoPlayer/FifoRecordAnalyzer.h"
 
 class FifoRecorder
 {
 public:
-	typedef void(*CallbackFunc)(void);
+  using CallbackFunc = std::function<void()>;
 
-	FifoRecorder();
-	~FifoRecorder();
+  FifoRecorder();
 
-	void StartRecording(s32 numFrames, CallbackFunc finishedCb);
-	void StopRecording();
+  void StartRecording(s32 numFrames, CallbackFunc finishedCb);
+  void StopRecording();
 
-	FifoDataFile* GetRecordedFile() { return m_File; }
+  bool IsRecordingDone() const;
 
-	// Called from video thread
+  FifoDataFile* GetRecordedFile() const;
+  // Called from video thread
 
-	// Must write one full GP command at a time
-	void WriteGPCommand(u8* data, u32 size);
+  // Must write one full GP command at a time
+  void WriteGPCommand(const u8* data, u32 size);
 
-	// Track memory that has been used and write it to the fifolog if it has changed.
-	// If memory is updated by the video backend (dynamicUpdate == true) take special care to make sure the data
-	// isn't baked into the fifolog.
-	void UseMemory(u32 address, u32 size, MemoryUpdate::Type type, bool dynamicUpdate = false);
+  // Track memory that has been used and write it to the fifolog if it has changed.
+  // If memory is updated by the video backend (dynamicUpdate == true) take special care to make
+  // sure the data
+  // isn't baked into the fifolog.
+  void UseMemory(u32 address, u32 size, MemoryUpdate::Type type, bool dynamicUpdate = false);
 
-	void EndFrame(u32 fifoStart, u32 fifoEnd);
+  void EndFrame(u32 fifoStart, u32 fifoEnd);
 
-	// This function must be called before writing GP commands
-	// bpMem must point to the actual bp mem array used by the plugin because it will be read as fifo data is recorded
-	void SetVideoMemory(u32* bpMem, u32* cpMem, u32* xfMem, u32* xfRegs, u32 xfRegsSize);
+  // This function must be called before writing GP commands
+  // bpMem must point to the actual bp mem array used by the plugin because it will be read as fifo
+  // data is recorded
+  void SetVideoMemory(const u32* bpMem, const u32* cpMem, const u32* xfMem, const u32* xfRegs,
+                      u32 xfRegsSize, const u8* texMem);
 
-	// Checked once per frame prior to callng EndFrame()
-	bool IsRecording() const { return m_IsRecording; }
-
-	static FifoRecorder& GetInstance();
+  // Checked once per frame prior to callng EndFrame()
+  bool IsRecording() const;
+  static FifoRecorder& GetInstance();
 
 private:
-	// Accessed from both GUI and video threads
+  // Accessed from both GUI and video threads
 
-	// True if video thread should send data
-	volatile bool m_IsRecording;
-	// True if m_IsRecording was true during last frame
-	volatile bool m_WasRecording;
-	volatile bool m_RequestedRecordingEnd;
-	volatile s32 m_RecordFramesRemaining;
-	volatile CallbackFunc m_FinishedCb;
+  std::recursive_mutex m_mutex;
+  // True if video thread should send data
+  bool m_IsRecording = false;
+  // True if m_IsRecording was true during last frame
+  bool m_WasRecording = false;
+  bool m_RequestedRecordingEnd = false;
+  s32 m_RecordFramesRemaining = 0;
+  CallbackFunc m_FinishedCb;
+  std::unique_ptr<FifoDataFile> m_File;
 
-	FifoDataFile* volatile m_File;
+  // Accessed only from video thread
 
-	// Accessed only from video thread
-
-	bool m_SkipNextData;
-	bool m_SkipFutureData;
-	bool m_FrameEnded;
-	FifoFrameInfo m_CurrentFrame;
-	std::vector<u8> m_FifoData;
-	std::vector<u8> m_Ram;
-	std::vector<u8> m_ExRam;
+  bool m_SkipNextData = true;
+  bool m_SkipFutureData = true;
+  bool m_FrameEnded = false;
+  FifoFrameInfo m_CurrentFrame;
+  std::vector<u8> m_FifoData;
+  std::vector<u8> m_Ram;
+  std::vector<u8> m_ExRam;
 };

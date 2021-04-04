@@ -2,478 +2,606 @@
 // Licensed under GPLv2+
 // Refer to the license.txt file included.
 
+#include "Core/Boot/Boot.h"
+
+#ifdef _MSC_VER
+#include <filesystem>
+namespace fs = std::filesystem;
+#define HAS_STD_FILESYSTEM
+#endif
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <memory>
+#include <numeric>
+#include <optional>
+#include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <zlib.h>
 
+#include "Common/Align.h"
+#include "Common/CDUtils.h"
 #include "Common/CommonPaths.h"
 #include "Common/CommonTypes.h"
+#include "Common/Config/Config.h"
 #include "Common/FileUtil.h"
-#include "Common/MathUtil.h"
+#include "Common/IOFile.h"
+#include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
 
+#include "Core/Boot/DolReader.h"
+#include "Core/Boot/ElfReader.h"
+#include "Core/CommonTitles.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigManager.h"
-#include "Core/Core.h"
-#include "Core/Host.h"
-#include "Core/PatchEngine.h"
-#include "Core/Boot/Boot.h"
-#include "Core/Boot/Boot_DOL.h"
-#include "Core/Debugger/Debugger_SymbolMap.h"
+#include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/HLE/HLE.h"
-#include "Core/HW/DVDInterface.h"
-#include "Core/HW/EXI_DeviceIPL.h"
+#include "Core/HW/DVD/DVDInterface.h"
+#include "Core/HW/EXI/EXI_DeviceIPL.h"
 #include "Core/HW/Memmap.h"
-#include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/VideoInterface.h"
-#include "Core/IPC_HLE/WII_IPC_HLE.h"
-#include "Core/PowerPC/PowerPC.h"
+#include "Core/Host.h"
+#include "Core/IOS/ES/ES.h"
+#include "Core/IOS/FS/FileSystem.h"
+#include "Core/IOS/IOS.h"
+#include "Core/IOS/IOSC.h"
+#include "Core/IOS/Uids.h"
+#include "Core/PatchEngine.h"
 #include "Core/PowerPC/PPCAnalyst.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
-#include "Core/PowerPC/SignatureDB.h"
+#include "Core/PowerPC/PowerPC.h"
 
-#include "DiscIO/NANDContentLoader.h"
-#include "DiscIO/VolumeCreator.h"
+#include "DiscIO/Enums.h"
+#include "DiscIO/VolumeDisc.h"
+#include "DiscIO/VolumeWad.h"
 
-bool CBoot::DVDRead(u64 dvd_offset, u32 output_address, u32 length, bool decrypt)
+static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
+                                            const std::string& folder_path)
 {
-	std::vector<u8> buffer(length);
-	if (!DVDInterface::GetVolume().Read(dvd_offset, length, buffer.data(), decrypt))
-		return false;
-	Memory::CopyToEmu(output_address, buffer.data(), length);
-	return true;
+#ifndef HAS_STD_FILESYSTEM
+  ASSERT(folder_path.back() == '/');
+#endif
+
+  std::vector<std::string> result;
+  std::vector<std::string> nonexistent;
+
+  std::ifstream s;
+  File::OpenFStream(s, m3u_path, std::ios_base::in);
+
+  std::string line;
+  while (std::getline(s, line))
+  {
+    // This is the UTF-8 representation of U+FEFF.
+    constexpr std::string_view utf8_bom = "\xEF\xBB\xBF";
+
+    if (StringBeginsWith(line, utf8_bom))
+    {
+      WARN_LOG_FMT(BOOT, "UTF-8 BOM in file: {}", m3u_path);
+      line.erase(0, utf8_bom.length());
+    }
+
+    if (!line.empty() && line.front() != '#')  // Comments start with #
+    {
+#ifdef HAS_STD_FILESYSTEM
+      const std::string path_to_add = PathToString(StringToPath(folder_path) / StringToPath(line));
+#else
+      const std::string path_to_add = line.front() != '/' ? folder_path + line : line;
+#endif
+
+      (File::Exists(path_to_add) ? result : nonexistent).push_back(path_to_add);
+    }
+  }
+
+  if (!nonexistent.empty())
+  {
+    PanicAlertFmtT("Files specified in the M3U file \"{0}\" were not found:\n{1}", m3u_path,
+                   JoinStrings(nonexistent, "\n"));
+    return {};
+  }
+
+  if (result.empty())
+    PanicAlertFmtT("No paths found in the M3U file \"{0}\"", m3u_path);
+
+  return result;
 }
 
-void CBoot::Load_FST(bool _bIsWii)
+BootParameters::BootParameters(Parameters&& parameters_,
+                               const std::optional<std::string>& savestate_path_)
+    : parameters(std::move(parameters_)), savestate_path(savestate_path_)
 {
-	if (!DVDInterface::VolumeIsValid())
-		return;
+}
 
-	const DiscIO::IVolume& volume = DVDInterface::GetVolume();
+std::unique_ptr<BootParameters>
+BootParameters::GenerateFromFile(std::string boot_path,
+                                 const std::optional<std::string>& savestate_path)
+{
+  return GenerateFromFile(std::vector<std::string>{std::move(boot_path)}, savestate_path);
+}
 
-	// copy first 20 bytes of disc to start of Mem 1
-	DVDRead(/*offset*/0, /*address*/0, /*length*/0x20, false);
+std::unique_ptr<BootParameters>
+BootParameters::GenerateFromFile(std::vector<std::string> paths,
+                                 const std::optional<std::string>& savestate_path)
+{
+  ASSERT(!paths.empty());
 
-	// copy of game id
-	Memory::Write_U32(Memory::Read_U32(0x0000), 0x3180);
+  const bool is_drive = Common::IsCDROMDevice(paths.front());
+  // Check if the file exist, we may have gotten it from a --elf command line
+  // that gave an incorrect file name
+  if (!is_drive && !File::Exists(paths.front()))
+  {
+    PanicAlertFmtT("The specified file \"{0}\" does not exist", paths.front());
+    return {};
+  }
 
-	u32 shift = 0;
-	if (_bIsWii)
-		shift = 2;
+  std::string folder_path;
+  std::string extension;
+  SplitPath(paths.front(), &folder_path, nullptr, &extension);
+  std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
 
-	u32 fst_offset = 0;
-	u32 fst_size = 0;
-	u32 max_fst_size = 0;
+  if (extension == ".m3u" || extension == ".m3u8")
+  {
+    paths = ReadM3UFile(paths.front(), folder_path);
+    if (paths.empty())
+      return {};
 
-	volume.ReadSwapped(0x0424, &fst_offset, _bIsWii);
-	volume.ReadSwapped(0x0428, &fst_size, _bIsWii);
-	volume.ReadSwapped(0x042c, &max_fst_size, _bIsWii);
+    SplitPath(paths.front(), nullptr, nullptr, &extension);
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+  }
 
-	u32 arena_high = ROUND_DOWN(0x817FFFFF - (max_fst_size << shift), 0x20);
-	Memory::Write_U32(arena_high, 0x00000034);
+  std::string path = paths.front();
+  if (paths.size() == 1)
+    paths.clear();
 
-	// load FST
-	DVDRead(fst_offset << shift, arena_high, fst_size << shift, _bIsWii);
-	Memory::Write_U32(arena_high, 0x00000038);
-	Memory::Write_U32(max_fst_size << shift, 0x0000003c);
+#ifdef ANDROID
+  if (extension.empty() && IsPathAndroidContent(path))
+  {
+    const std::string display_name = GetAndroidContentDisplayName(path);
+    SplitPath(display_name, nullptr, nullptr, &extension);
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+  }
+#endif
+
+  static const std::unordered_set<std::string> disc_image_extensions = {
+      {".gcm", ".iso", ".tgc", ".wbfs", ".ciso", ".gcz", ".wia", ".rvz", ".dol", ".elf"}};
+  if (disc_image_extensions.find(extension) != disc_image_extensions.end() || is_drive)
+  {
+    std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDisc(path);
+    if (disc)
+    {
+      return std::make_unique<BootParameters>(Disc{std::move(path), std::move(disc), paths},
+                                              savestate_path);
+    }
+
+    if (extension == ".elf")
+    {
+      auto elf_reader = std::make_unique<ElfReader>(path);
+      return std::make_unique<BootParameters>(Executable{std::move(path), std::move(elf_reader)},
+                                              savestate_path);
+    }
+
+    if (extension == ".dol")
+    {
+      auto dol_reader = std::make_unique<DolReader>(path);
+      return std::make_unique<BootParameters>(Executable{std::move(path), std::move(dol_reader)},
+                                              savestate_path);
+    }
+
+    if (is_drive)
+    {
+      PanicAlertFmtT("Could not read \"{0}\". "
+                     "There is no disc in the drive or it is not a GameCube/Wii backup. "
+                     "Please note that Dolphin cannot play games directly from the original "
+                     "GameCube and Wii discs.",
+                     path);
+    }
+    else
+    {
+      PanicAlertFmtT("\"{0}\" is an invalid GCM/ISO file, or is not a GC/Wii ISO.", path);
+    }
+    return {};
+  }
+
+  if (extension == ".dff")
+    return std::make_unique<BootParameters>(DFF{std::move(path)}, savestate_path);
+
+  if (extension == ".wad")
+  {
+    std::unique_ptr<DiscIO::VolumeWAD> wad = DiscIO::CreateWAD(std::move(path));
+    if (wad)
+      return std::make_unique<BootParameters>(std::move(*wad), savestate_path);
+  }
+
+  PanicAlertFmtT("Could not recognize file {0}", path);
+  return {};
+}
+
+BootParameters::IPL::IPL(DiscIO::Region region_) : region(region_)
+{
+  const std::string directory = SConfig::GetInstance().GetDirectoryForRegion(region);
+  path = SConfig::GetInstance().GetBootROMPath(directory);
+}
+
+BootParameters::IPL::IPL(DiscIO::Region region_, Disc&& disc_) : IPL(region_)
+{
+  disc = std::move(disc_);
+}
+
+// Inserts a disc into the emulated disc drive and returns a pointer to it.
+// The returned pointer must only be used while we are still booting,
+// because DVDThread can do whatever it wants to the disc after that.
+static const DiscIO::VolumeDisc* SetDisc(std::unique_ptr<DiscIO::VolumeDisc> disc,
+                                         std::vector<std::string> auto_disc_change_paths = {})
+{
+  const DiscIO::VolumeDisc* pointer = disc.get();
+  DVDInterface::SetDisc(std::move(disc), auto_disc_change_paths);
+  return pointer;
+}
+
+bool CBoot::DVDRead(const DiscIO::VolumeDisc& disc, u64 dvd_offset, u32 output_address, u32 length,
+                    const DiscIO::Partition& partition)
+{
+  std::vector<u8> buffer(length);
+  if (!disc.Read(dvd_offset, length, buffer.data(), partition))
+    return false;
+  Memory::CopyToEmu(output_address, buffer.data(), length);
+  return true;
+}
+
+bool CBoot::DVDReadDiscID(const DiscIO::VolumeDisc& disc, u32 output_address)
+{
+  std::array<u8, 0x20> buffer;
+  if (!disc.Read(0, buffer.size(), buffer.data(), DiscIO::PARTITION_NONE))
+    return false;
+  Memory::CopyToEmu(output_address, buffer.data(), buffer.size());
+  // Transition out of the DiscIdNotRead state (which the drive should be in at this point,
+  // on the assumption that this is only used for the first read)
+  DVDInterface::SetDriveState(DVDInterface::DriveState::ReadyNoReadsMade);
+  return true;
 }
 
 void CBoot::UpdateDebugger_MapLoaded()
 {
-	Host_NotifyMapLoaded();
+  Host_NotifyMapLoaded();
 }
 
-bool CBoot::FindMapFile(std::string* existing_map_file,
-                        std::string* writable_map_file,
-                        std::string* title_id)
+// Get map file paths for the active title.
+bool CBoot::FindMapFile(std::string* existing_map_file, std::string* writable_map_file)
 {
-	std::string title_id_str;
-	size_t name_begin_index;
+  const std::string& game_id = SConfig::GetInstance().m_debugger_game_id;
 
-	SConfig& _StartupPara = SConfig::GetInstance();
-	switch (_StartupPara.m_BootType)
-	{
-	case SConfig::BOOT_WII_NAND:
-	{
-		const DiscIO::CNANDContentLoader& Loader =
-				DiscIO::CNANDContentManager::Access().GetNANDLoader(_StartupPara.m_strFilename);
-		if (Loader.IsValid())
-		{
-			u64 TitleID = Loader.GetTitleID();
-			title_id_str = StringFromFormat("%08X_%08X",
-					(u32)(TitleID >> 32) & 0xFFFFFFFF,
-					(u32)TitleID & 0xFFFFFFFF);
-		}
-		break;
-	}
+  if (writable_map_file)
+    *writable_map_file = File::GetUserPath(D_MAPS_IDX) + game_id + ".map";
 
-	case SConfig::BOOT_ELF:
-	case SConfig::BOOT_DOL:
-		// Strip the .elf/.dol file extension and directories before the name
-		name_begin_index = _StartupPara.m_strFilename.find_last_of("/") + 1;
-		if ((_StartupPara.m_strFilename.find_last_of("\\") + 1) > name_begin_index)
-		{
-			name_begin_index = _StartupPara.m_strFilename.find_last_of("\\") + 1;
-		}
-		title_id_str = _StartupPara.m_strFilename.substr(
-				name_begin_index, _StartupPara.m_strFilename.size() - 4 - name_begin_index);
-		break;
+  static const std::array<std::string, 2> maps_directories{
+      File::GetUserPath(D_MAPS_IDX),
+      File::GetSysDirectory() + MAPS_DIR DIR_SEP,
+  };
+  for (const auto& directory : maps_directories)
+  {
+    std::string path = directory + game_id + ".map";
+    if (File::Exists(path))
+    {
+      if (existing_map_file)
+        *existing_map_file = std::move(path);
 
-	default:
-		title_id_str = _StartupPara.GetUniqueID();
-		break;
-	}
+      return true;
+    }
+  }
 
-	if (writable_map_file)
-		*writable_map_file = File::GetUserPath(D_MAPS_IDX) + title_id_str + ".map";
-
-	if (title_id)
-		*title_id = title_id_str;
-
-	bool found = false;
-	static const std::string maps_directories[] = {
-		File::GetUserPath(D_MAPS_IDX),
-		File::GetSysDirectory() + MAPS_DIR DIR_SEP
-	};
-	for (size_t i = 0; !found && i < ArraySize(maps_directories); ++i)
-	{
-		std::string path = maps_directories[i] + title_id_str + ".map";
-		if (File::Exists(path))
-		{
-			found = true;
-			if (existing_map_file)
-				*existing_map_file = path;
-		}
-	}
-
-	return found;
+  return false;
 }
 
 bool CBoot::LoadMapFromFilename()
 {
-	std::string strMapFilename;
-	bool found = FindMapFile(&strMapFilename, nullptr);
-	if (found && g_symbolDB.LoadMap(strMapFilename))
-	{
-		UpdateDebugger_MapLoaded();
-		return true;
-	}
+  std::string strMapFilename;
+  bool found = FindMapFile(&strMapFilename, nullptr);
+  if (found && g_symbolDB.LoadMap(strMapFilename))
+  {
+    UpdateDebugger_MapLoaded();
+    return true;
+  }
 
-	return false;
+  return false;
 }
 
 // If ipl.bin is not found, this function does *some* of what BS1 does:
 // loading IPL(BS2) and jumping to it.
 // It does not initialize the hardware or anything else like BS1 does.
-bool CBoot::Load_BS2(const std::string& _rBootROMFilename)
+bool CBoot::Load_BS2(const std::string& boot_rom_filename)
 {
-	// CRC32
-	const u32 USA_v1_0 = 0x6D740AE7; // https://forums.dolphin-emu.org/Thread-unknown-hash-on-ipl-bin?pid=385344#pid385344
-	const u32 USA_v1_1 = 0xD5E6FEEA; // https://forums.dolphin-emu.org/Thread-unknown-hash-on-ipl-bin?pid=385334#pid385334
-	const u32 USA_v1_2 = 0x86573808; // https://forums.dolphin-emu.org/Thread-unknown-hash-on-ipl-bin?pid=385399#pid385399
-	const u32 BRA_v1_0 = 0x667D0B64; // GameCubes sold in Brazil have this IPL. Same as USA v1.2 but localized
-	const u32 JAP_v1_0 = 0x6DAC1F2A; // Redump
-	const u32 JAP_v1_1 = 0xD235E3F9; // https://bugs.dolphin-emu.org/issues/8936
-	const u32 PAL_v1_0 = 0x4F319F43; // Redump
-	const u32 PAL_v1_2 = 0xAD1B7F16; // Redump
+  // CRC32 hashes of the IPL file, obtained from Redump
+  constexpr u32 NTSC_v1_0 = 0x6DAC1F2A;
+  constexpr u32 NTSC_v1_1 = 0xD5E6FEEA;
+  constexpr u32 NTSC_v1_2 = 0x86573808;
+  constexpr u32 MPAL_v1_1 = 0x667D0B64;  // Brazil
+  constexpr u32 PAL_v1_0 = 0x4F319F43;
+  constexpr u32 PAL_v1_2 = 0xAD1B7F16;
 
-	// Load the whole ROM dump
-	std::string data;
-	if (!File::ReadFileToString(_rBootROMFilename, data))
-		return false;
+  // Load the whole ROM dump
+  std::string data;
+  if (!File::ReadFileToString(boot_rom_filename, data))
+    return false;
 
-	// Use zlibs crc32 implementation to compute the hash
-	u32 ipl_hash = crc32(0L, Z_NULL, 0);
-	ipl_hash = crc32(ipl_hash, (const Bytef*)data.data(), (u32)data.size());
-	std::string ipl_region;
-	switch (ipl_hash)
-	{
-	case USA_v1_0:
-	case USA_v1_1:
-	case USA_v1_2:
-	case BRA_v1_0:
-		ipl_region = USA_DIR;
-		break;
-	case JAP_v1_0:
-	case JAP_v1_1:
-		ipl_region = JAP_DIR;
-		break;
-	case PAL_v1_0:
-	case PAL_v1_2:
-		ipl_region = EUR_DIR;
-		break;
-	default:
-		PanicAlertT("IPL with unknown hash %x", ipl_hash);
-		break;
-	}
+  // Use zlibs crc32 implementation to compute the hash
+  u32 ipl_hash = crc32(0L, Z_NULL, 0);
+  ipl_hash = crc32(ipl_hash, (const Bytef*)data.data(), (u32)data.size());
+  bool known_ipl = false;
+  bool pal_ipl = false;
+  switch (ipl_hash)
+  {
+  case NTSC_v1_0:
+  case NTSC_v1_1:
+  case NTSC_v1_2:
+  case MPAL_v1_1:
+    known_ipl = true;
+    break;
+  case PAL_v1_0:
+  case PAL_v1_2:
+    pal_ipl = true;
+    known_ipl = true;
+    break;
+  default:
+    PanicAlertFmtT("The IPL file is not a known good dump. (CRC32: {0:x})", ipl_hash);
+    break;
+  }
 
-	std::string BootRegion = _rBootROMFilename.substr(_rBootROMFilename.find_last_of(DIR_SEP) - 3, 3);
-	if (BootRegion != ipl_region)
-		PanicAlertT("%s IPL found in %s directory. The disc might not be recognized",
-		            ipl_region.c_str(), BootRegion.c_str());
+  const DiscIO::Region boot_region = SConfig::GetInstance().m_region;
+  if (known_ipl && pal_ipl != (boot_region == DiscIO::Region::PAL))
+  {
+    PanicAlertFmtT("{0} IPL found in {1} directory. The disc might not be recognized",
+                   pal_ipl ? "PAL" : "NTSC", SConfig::GetDirectoryForRegion(boot_region));
+  }
 
-	// Run the descrambler over the encrypted section containing BS1/BS2
-	CEXIIPL::Descrambler((u8*)data.data() + 0x100, 0x1AFE00);
+  // Run the descrambler over the encrypted section containing BS1/BS2
+  ExpansionInterface::CEXIIPL::Descrambler((u8*)data.data() + 0x100, 0x1AFE00);
 
-	// TODO: Execution is supposed to start at 0xFFF00000, not 0x81200000;
-	// copying the initial boot code to 0x81200000 is a hack.
-	// For now, HLE the first few instructions and start at 0x81200150
-	// to work around this.
-	Memory::CopyToEmu(0x01200000, data.data() + 0x100, 0x700);
-	Memory::CopyToEmu(0x01300000, data.data() + 0x820, 0x1AFE00);
-	PowerPC::ppcState.gpr[3] = 0xfff0001f;
-	PowerPC::ppcState.gpr[4] = 0x00002030;
-	PowerPC::ppcState.gpr[5] = 0x0000009c;
-	PowerPC::ppcState.msr = 0x00002030;
-	PowerPC::ppcState.spr[SPR_HID0] = 0x0011c464;
-	PowerPC::ppcState.spr[SPR_IBAT0U] = 0x80001fff;
-	PowerPC::ppcState.spr[SPR_IBAT0L] = 0x00000002;
-	PowerPC::ppcState.spr[SPR_IBAT3U] = 0xfff0001f;
-	PowerPC::ppcState.spr[SPR_IBAT3L] = 0xfff00001;
-	PowerPC::ppcState.spr[SPR_DBAT0U] = 0x80001fff;
-	PowerPC::ppcState.spr[SPR_DBAT0L] = 0x00000002;
-	PowerPC::ppcState.spr[SPR_DBAT1U] = 0xc0001fff;
-	PowerPC::ppcState.spr[SPR_DBAT1L] = 0x0000002a;
-	PowerPC::ppcState.spr[SPR_DBAT3U] = 0xfff0001f;
-	PowerPC::ppcState.spr[SPR_DBAT3L] = 0xfff00001;
-	PC = 0x81200150;
-	return true;
+  // TODO: Execution is supposed to start at 0xFFF00000, not 0x81200000;
+  // copying the initial boot code to 0x81200000 is a hack.
+  // For now, HLE the first few instructions and start at 0x81200150
+  // to work around this.
+  Memory::CopyToEmu(0x01200000, data.data() + 0x100, 0x700);
+  Memory::CopyToEmu(0x01300000, data.data() + 0x820, 0x1AFE00);
+
+  PowerPC::ppcState.gpr[3] = 0xfff0001f;
+  PowerPC::ppcState.gpr[4] = 0x00002030;
+  PowerPC::ppcState.gpr[5] = 0x0000009c;
+
+  MSR.FP = 1;
+  MSR.DR = 1;
+  MSR.IR = 1;
+
+  PowerPC::ppcState.spr[SPR_HID0] = 0x0011c464;
+  PowerPC::ppcState.spr[SPR_IBAT3U] = 0xfff0001f;
+  PowerPC::ppcState.spr[SPR_IBAT3L] = 0xfff00001;
+  PowerPC::ppcState.spr[SPR_DBAT3U] = 0xfff0001f;
+  PowerPC::ppcState.spr[SPR_DBAT3L] = 0xfff00001;
+  SetupBAT(/*is_wii*/ false);
+
+  PC = 0x81200150;
+  return true;
 }
 
+static void SetDefaultDisc()
+{
+  const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
+  if (!default_iso.empty())
+    SetDisc(DiscIO::CreateDisc(default_iso));
+}
+
+static void CopyDefaultExceptionHandlers()
+{
+  constexpr u32 EXCEPTION_HANDLER_ADDRESSES[] = {0x00000100, 0x00000200, 0x00000300, 0x00000400,
+                                                 0x00000500, 0x00000600, 0x00000700, 0x00000800,
+                                                 0x00000900, 0x00000C00, 0x00000D00, 0x00000F00,
+                                                 0x00001300, 0x00001400, 0x00001700};
+
+  constexpr u32 RFI_INSTRUCTION = 0x4C000064;
+  for (const u32 address : EXCEPTION_HANDLER_ADDRESSES)
+    Memory::Write_U32(RFI_INSTRUCTION, address);
+}
 
 // Third boot step after BootManager and Core. See Call schedule in BootManager.cpp
-bool CBoot::BootUp()
+bool CBoot::BootUp(std::unique_ptr<BootParameters> boot)
 {
-	SConfig& _StartupPara = SConfig::GetInstance();
+  SConfig& config = SConfig::GetInstance();
 
-	NOTICE_LOG(BOOT, "Booting %s", _StartupPara.m_strFilename.c_str());
+  if (!g_symbolDB.IsEmpty())
+  {
+    g_symbolDB.Clear();
+    UpdateDebugger_MapLoaded();
+  }
 
-	g_symbolDB.Clear();
+  // PAL Wii uses NTSC framerate and linecount in 60Hz modes
+  VideoInterface::Preset(DiscIO::IsNTSC(config.m_region) ||
+                         (config.bWii && Config::Get(Config::SYSCONF_PAL60)));
 
-	// PAL Wii uses NTSC framerate and linecount in 60Hz modes
-	VideoInterface::Preset(_StartupPara.bNTSC || (_StartupPara.bWii && _StartupPara.bPAL60));
+  struct BootTitle
+  {
+    BootTitle() : config(SConfig::GetInstance()) {}
+    bool operator()(BootParameters::Disc& disc) const
+    {
+      NOTICE_LOG_FMT(BOOT, "Booting from disc: {}", disc.path);
+      const DiscIO::VolumeDisc* volume =
+          SetDisc(std::move(disc.volume), disc.auto_disc_change_paths);
 
-	switch (_StartupPara.m_BootType)
-	{
-	// GCM and Wii
-	case SConfig::BOOT_ISO:
-	{
-		DVDInterface::SetVolumeName(_StartupPara.m_strFilename);
-		DVDInterface::SetDiscInside(DVDInterface::VolumeIsValid());
-		if (!DVDInterface::VolumeIsValid())
-			return false;
+      if (!volume)
+        return false;
 
-		const DiscIO::IVolume& pVolume = DVDInterface::GetVolume();
+      if (!EmulatedBS2(config.bWii, *volume))
+        return false;
 
-		if ((pVolume.GetVolumeType() == DiscIO::IVolume::WII_DISC) != _StartupPara.bWii)
-		{
-			PanicAlertT("Warning - starting ISO in wrong console mode!");
-		}
+      SConfig::OnNewTitleLoad();
+      return true;
+    }
 
-		std::string unique_id = DVDInterface::GetVolume().GetUniqueID();
-		if (unique_id.size() >= 4)
-			VideoInterface::SetRegionReg(unique_id.at(3));
+    bool operator()(const BootParameters::Executable& executable) const
+    {
+      NOTICE_LOG_FMT(BOOT, "Booting from executable: {}", executable.path);
 
-		std::vector<u8> tmd_buffer = pVolume.GetTMD();
-		if (!tmd_buffer.empty())
-		{
-			WII_IPC_HLE_Interface::ES_DIVerify(tmd_buffer);
-		}
+      if (!executable.reader->IsValid())
+        return false;
 
-		_StartupPara.bWii = pVolume.GetVolumeType() == DiscIO::IVolume::WII_DISC;
+      if (!executable.reader->LoadIntoMemory())
+      {
+        PanicAlertFmtT("Failed to load the executable to memory.");
+        return false;
+      }
 
-		// HLE BS2 or not
-		if (_StartupPara.bHLE_BS2)
-		{
-			EmulatedBS2(_StartupPara.bWii);
-		}
-		else if (!Load_BS2(_StartupPara.m_strBootROM))
-		{
-			// If we can't load the bootrom file we HLE it instead
-			EmulatedBS2(_StartupPara.bWii);
-		}
-		else
-		{
-			// Load patches if they weren't already
-			PatchEngine::LoadPatches();
-		}
+      SetDefaultDisc();
 
-		// Scan for common HLE functions
-		if (_StartupPara.bSkipIdle && _StartupPara.bHLE_BS2 && !_StartupPara.bEnableDebugging)
-		{
-			PPCAnalyst::FindFunctions(0x80004000, 0x811fffff, &g_symbolDB);
-			SignatureDB db;
-			if (db.Load(File::GetSysDirectory() + TOTALDB))
-			{
-				db.Apply(&g_symbolDB);
-				HLE::PatchFunctions();
-				db.Clear();
-			}
-		}
+      SetupMSR();
+      SetupBAT(config.bWii);
+      CopyDefaultExceptionHandlers();
 
-		// Try to load the symbol map if there is one, and then scan it for
-		// and eventually replace code
-		if (LoadMapFromFilename())
-			HLE::PatchFunctions();
+      if (config.bWii)
+      {
+        PowerPC::ppcState.spr[SPR_HID0] = 0x0011c464;
+        PowerPC::ppcState.spr[SPR_HID4] = 0x82000000;
 
-		break;
-	}
+        // Set a value for the SP. It doesn't matter where this points to,
+        // as long as it is a valid location. This value is taken from a homebrew binary.
+        PowerPC::ppcState.gpr[1] = 0x8004d4bc;
 
-	// DOL
-	case SConfig::BOOT_DOL:
-	{
-		CDolLoader dolLoader(_StartupPara.m_strFilename);
-		if (!dolLoader.IsValid())
-			return false;
+        // Because there is no TMD to get the requested system (IOS) version from,
+        // we default to IOS58, which is the version used by the Homebrew Channel.
+        SetupWiiMemory(IOS::HLE::IOSC::ConsoleType::Retail);
+        IOS::HLE::GetIOS()->BootIOS(Titles::IOS(58));
+      }
+      else
+      {
+        SetupGCMemory();
+      }
 
-		// Check if we have gotten a Wii file or not
-		bool dolWii = dolLoader.IsWii();
-		if (dolWii != _StartupPara.bWii)
-		{
-			PanicAlertT("Warning - starting DOL in wrong console mode!");
-		}
+      SConfig::OnNewTitleLoad();
 
-		bool BS2Success = false;
+      PC = executable.reader->GetEntryPoint();
 
-		if (dolWii)
-		{
-			BS2Success = EmulatedBS2(dolWii);
-		}
-		else if ((!DVDInterface::VolumeIsValid() || DVDInterface::GetVolume().GetVolumeType() != DiscIO::IVolume::WII_DISC) &&
-		         !_StartupPara.m_strDefaultISO.empty())
-		{
-			DVDInterface::SetVolumeName(_StartupPara.m_strDefaultISO);
-			BS2Success = EmulatedBS2(dolWii);
-		}
+      if (executable.reader->LoadSymbols())
+      {
+        UpdateDebugger_MapLoaded();
+        HLE::PatchFunctions();
+      }
+      return true;
+    }
 
-		if (!_StartupPara.m_strDVDRoot.empty())
-		{
-			NOTICE_LOG(BOOT, "Setting DVDRoot %s", _StartupPara.m_strDVDRoot.c_str());
-			DVDInterface::SetVolumeDirectory(_StartupPara.m_strDVDRoot, dolWii, _StartupPara.m_strApploader, _StartupPara.m_strFilename);
-			BS2Success = EmulatedBS2(dolWii);
-		}
+    bool operator()(const DiscIO::VolumeWAD& wad) const
+    {
+      SetDefaultDisc();
+      if (!Boot_WiiWAD(wad))
+        return false;
 
-		DVDInterface::SetDiscInside(DVDInterface::VolumeIsValid());
+      SConfig::OnNewTitleLoad();
+      return true;
+    }
 
-		if (!BS2Success)
-		{
-			// Set up MSR and the BAT SPR registers.
-			UReg_MSR& m_MSR = ((UReg_MSR&)PowerPC::ppcState.msr);
-			m_MSR.FP = 1;
-			m_MSR.DR = 1;
-			m_MSR.IR = 1;
-			m_MSR.EE = 1;
-			PowerPC::ppcState.spr[SPR_IBAT0U] = 0x80001fff;
-			PowerPC::ppcState.spr[SPR_IBAT0L] = 0x00000002;
-			PowerPC::ppcState.spr[SPR_IBAT4U] = 0x90001fff;
-			PowerPC::ppcState.spr[SPR_IBAT4L] = 0x10000002;
-			PowerPC::ppcState.spr[SPR_DBAT0U] = 0x80001fff;
-			PowerPC::ppcState.spr[SPR_DBAT0L] = 0x00000002;
-			PowerPC::ppcState.spr[SPR_DBAT1U] = 0xc0001fff;
-			PowerPC::ppcState.spr[SPR_DBAT1L] = 0x0000002a;
-			PowerPC::ppcState.spr[SPR_DBAT4U] = 0x90001fff;
-			PowerPC::ppcState.spr[SPR_DBAT4L] = 0x10000002;
-			PowerPC::ppcState.spr[SPR_DBAT5U] = 0xd0001fff;
-			PowerPC::ppcState.spr[SPR_DBAT5L] = 0x1000002a;
+    bool operator()(const BootParameters::NANDTitle& nand_title) const
+    {
+      SetDefaultDisc();
+      if (!BootNANDTitle(nand_title.id))
+        return false;
 
-			dolLoader.Load();
-			PC = dolLoader.GetEntryPoint();
-		}
+      SConfig::OnNewTitleLoad();
+      return true;
+    }
 
-		if (LoadMapFromFilename())
-			HLE::PatchFunctions();
+    bool operator()(const BootParameters::IPL& ipl) const
+    {
+      NOTICE_LOG_FMT(BOOT, "Booting GC IPL: {}", ipl.path);
+      if (!File::Exists(ipl.path))
+      {
+        if (ipl.disc)
+          PanicAlertFmtT("Cannot start the game, because the GC IPL could not be found.");
+        else
+          PanicAlertFmtT("Cannot find the GC IPL.");
+        return false;
+      }
 
-		break;
-	}
+      if (!Load_BS2(ipl.path))
+        return false;
 
-	// ELF
-	case SConfig::BOOT_ELF:
-	{
-		// load image or create virtual drive from directory
-		if (!_StartupPara.m_strDVDRoot.empty())
-		{
-			NOTICE_LOG(BOOT, "Setting DVDRoot %s", _StartupPara.m_strDVDRoot.c_str());
-			DVDInterface::SetVolumeDirectory(_StartupPara.m_strDVDRoot, _StartupPara.bWii);
-		}
-		else if (!_StartupPara.m_strDefaultISO.empty())
-		{
-			NOTICE_LOG(BOOT, "Loading default ISO %s", _StartupPara.m_strDefaultISO.c_str());
-			DVDInterface::SetVolumeName(_StartupPara.m_strDefaultISO);
-		}
-		else
-		{
-			DVDInterface::SetVolumeDirectory(_StartupPara.m_strFilename, _StartupPara.bWii);
-		}
+      if (ipl.disc)
+      {
+        NOTICE_LOG_FMT(BOOT, "Inserting disc: {}", ipl.disc->path);
+        SetDisc(DiscIO::CreateDisc(ipl.disc->path), ipl.disc->auto_disc_change_paths);
+      }
 
-		DVDInterface::SetDiscInside(DVDInterface::VolumeIsValid());
+      SConfig::OnNewTitleLoad();
+      return true;
+    }
 
-		// Poor man's bootup
-		if(_StartupPara.bWii)
-			SetupWiiMemory(DiscIO::IVolume::COUNTRY_UNKNOWN);
-		else
-			EmulatedBS2_GC(true);
+    bool operator()(const BootParameters::DFF& dff) const
+    {
+      NOTICE_LOG_FMT(BOOT, "Booting DFF: {}", dff.dff_path);
+      return FifoPlayer::GetInstance().Open(dff.dff_path);
+    }
 
-		Load_FST(_StartupPara.bWii);
-		if(!Boot_ELF(_StartupPara.m_strFilename))
-			return false;
+  private:
+    const SConfig& config;
+  };
 
-		UpdateDebugger_MapLoaded();
-		Dolphin_Debugger::AddAutoBreakpoints();
-		break;
-	}
+  if (!std::visit(BootTitle(), boot->parameters))
+    return false;
 
-	// Wii WAD
-	case SConfig::BOOT_WII_NAND:
-		Boot_WiiWAD(_StartupPara.m_strFilename);
+  return true;
+}
 
-		if (LoadMapFromFilename())
-			HLE::PatchFunctions();
+BootExecutableReader::BootExecutableReader(const std::string& file_name)
+    : BootExecutableReader(File::IOFile{file_name, "rb"})
+{
+}
 
-		// load default image or create virtual drive from directory
-		if (!_StartupPara.m_strDVDRoot.empty())
-			DVDInterface::SetVolumeDirectory(_StartupPara.m_strDVDRoot, true);
-		else if (!_StartupPara.m_strDefaultISO.empty())
-			DVDInterface::SetVolumeName(_StartupPara.m_strDefaultISO);
+BootExecutableReader::BootExecutableReader(File::IOFile file)
+{
+  file.Seek(0, SEEK_SET);
+  m_bytes.resize(file.GetSize());
+  file.ReadBytes(m_bytes.data(), m_bytes.size());
+}
 
-		DVDInterface::SetDiscInside(DVDInterface::VolumeIsValid());
-		break;
+BootExecutableReader::BootExecutableReader(std::vector<u8> bytes) : m_bytes(std::move(bytes))
+{
+}
 
+BootExecutableReader::~BootExecutableReader() = default;
 
-	// Bootstrap 2 (AKA: Initial Program Loader, "BIOS")
-	case SConfig::BOOT_BS2:
-	{
-		DVDInterface::SetDiscInside(DVDInterface::VolumeIsValid());
-		if (Load_BS2(_StartupPara.m_strBootROM))
-		{
-			if (LoadMapFromFilename())
-				HLE::PatchFunctions();
-		}
-		else
-		{
-			return false;
-		}
-		break;
-	}
+void StateFlags::UpdateChecksum()
+{
+  constexpr size_t length_in_bytes = sizeof(StateFlags) - 4;
+  constexpr size_t num_elements = length_in_bytes / sizeof(u32);
+  std::array<u32, num_elements> flag_data;
+  std::memcpy(flag_data.data(), &flags, length_in_bytes);
+  checksum = std::accumulate(flag_data.cbegin(), flag_data.cend(), 0U);
+}
 
-	case SConfig::BOOT_DFF:
-		// do nothing
-		break;
+void UpdateStateFlags(std::function<void(StateFlags*)> update_function)
+{
+  CreateSystemMenuTitleDirs();
+  const std::string file_path = Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_STATE;
+  const auto fs = IOS::HLE::GetIOS()->GetFS();
+  constexpr IOS::HLE::FS::Mode rw_mode = IOS::HLE::FS::Mode::ReadWrite;
+  const auto file = fs->CreateAndOpenFile(IOS::SYSMENU_UID, IOS::SYSMENU_GID, file_path,
+                                          {rw_mode, rw_mode, rw_mode});
+  if (!file)
+    return;
 
-	default:
-	{
-		PanicAlertT("Tried to load an unknown file type.");
-		return false;
-	}
-	}
+  StateFlags state{};
+  if (file->GetStatus()->size == sizeof(StateFlags))
+    file->Read(&state, 1);
 
-	// HLE jump to loader (homebrew).  Disabled when Gecko is active as it interferes with the code handler
-	if (!SConfig::GetInstance().bEnableCheats)
-	{
-		HLE::Patch(0x80001800, "HBReload");
-		Memory::CopyToEmu(0x00001804, "STUBHAXX", 8);
-	}
+  update_function(&state);
+  state.UpdateChecksum();
 
-	// Not part of the binary itself, but either we or Gecko OS might insert
-	// this, and it doesn't clear the icache properly.
-	HLE::Patch(0x800018a8, "GeckoCodehandler");
-	return true;
+  file->Seek(0, IOS::HLE::FS::SeekMode::Set);
+  file->Write(&state, 1);
+}
+
+void CreateSystemMenuTitleDirs()
+{
+  const auto es = IOS::HLE::GetIOS()->GetES();
+  es->CreateTitleDirectories(Titles::SYSTEM_MENU, IOS::SYSMENU_GID);
 }

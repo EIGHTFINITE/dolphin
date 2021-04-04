@@ -37,13 +37,14 @@ This file mainly deals with the [Drive I/F], however [AIDFR] controls
   TODO maybe the files should be merged?
 */
 
+#include "Core/HW/AudioInterface.h"
+
 #include <algorithm>
 
 #include "AudioCommon/AudioCommon.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
 #include "Core/CoreTiming.h"
-#include "Core/HW/AudioInterface.h"
 #include "Core/HW/MMIO.h"
 #include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/SystemTimers.h"
@@ -51,105 +52,110 @@ This file mainly deals with the [Drive I/F], however [AIDFR] controls
 
 namespace AudioInterface
 {
-
 // Internal hardware addresses
 enum
 {
-	AI_CONTROL_REGISTER = 0x6C00,
-	AI_VOLUME_REGISTER  = 0x6C04,
-	AI_SAMPLE_COUNTER   = 0x6C08,
-	AI_INTERRUPT_TIMING = 0x6C0C,
+  AI_CONTROL_REGISTER = 0x6C00,
+  AI_VOLUME_REGISTER = 0x6C04,
+  AI_SAMPLE_COUNTER = 0x6C08,
+  AI_INTERRUPT_TIMING = 0x6C0C,
 };
 
 enum
 {
-	AIS_32KHz = 0,
-	AIS_48KHz = 1,
+  AIS_32KHz = 0,
+  AIS_48KHz = 1,
 
-	AID_32KHz = 1,
-	AID_48KHz = 0
+  AID_32KHz = 1,
+  AID_48KHz = 0
 };
 
 // AI Control Register
 union AICR
 {
-	AICR() { hex = 0;}
-	AICR(u32 _hex) { hex = _hex;}
-	struct
-	{
-		u32 PSTAT    : 1;  // sample counter/playback enable
-		u32 AISFR    : 1;  // AIS Frequency (0=32khz 1=48khz)
-		u32 AIINTMSK : 1;  // 0=interrupt masked 1=interrupt enabled
-		u32 AIINT    : 1;  // audio interrupt status
-		u32 AIINTVLD : 1;  // This bit controls whether AIINT is affected by the Interrupt Timing register
-		                      // matching the sample counter. Once set, AIINT will hold its last value
-		u32 SCRESET  : 1;  // write to reset counter
-		u32 AIDFR    : 1;  // AID Frequency (0=48khz 1=32khz)
-		u32          :25;
-	};
-	u32 hex;
+  AICR() = default;
+  explicit AICR(u32 hex_) : hex{hex_} {}
+  struct
+  {
+    u32 PSTAT : 1;     // sample counter/playback enable
+    u32 AISFR : 1;     // AIS Frequency (0=32khz 1=48khz)
+    u32 AIINTMSK : 1;  // 0=interrupt masked 1=interrupt enabled
+    u32 AIINT : 1;     // audio interrupt status
+    u32 AIINTVLD : 1;  // This bit controls whether AIINT is affected by the Interrupt Timing
+                       // register
+                       // matching the sample counter. Once set, AIINT will hold its last value
+    u32 SCRESET : 1;   // write to reset counter
+    u32 AIDFR : 1;     // AID Frequency (0=48khz 1=32khz)
+    u32 : 25;
+  };
+  u32 hex = 0;
 };
 
 // AI Volume Register
 union AIVR
 {
-	AIVR() { hex = 0;}
-	struct
-	{
-		u32 left  : 8;
-		u32 right : 8;
-		u32       :16;
-	};
-	u32 hex;
+  struct
+  {
+    u32 left : 8;
+    u32 right : 8;
+    u32 : 16;
+  };
+  u32 hex = 0;
 };
 
 // STATE_TO_SAVE
 // Registers
-static AICR m_Control;
-static AIVR m_Volume;
-static u32 m_SampleCounter = 0;
-static u32 m_InterruptTiming = 0;
+static AICR s_control;
+static AIVR s_volume;
+static u32 s_sample_counter = 0;
+static u32 s_interrupt_timing = 0;
 
-static u64 g_LastCPUTime = 0;
-static u64 g_CPUCyclesPerSample = 0xFFFFFFFFFFFULL;
+static u64 s_last_cpu_time = 0;
+static u64 s_cpu_cycles_per_sample = 0xFFFFFFFFFFFULL;
 
-static unsigned int g_AISSampleRate = 48000;
-static unsigned int g_AIDSampleRate = 32000;
+static u32 s_ais_sample_rate = 48000;
+static u32 s_aid_sample_rate = 32000;
 
-void DoState(PointerWrap &p)
+void DoState(PointerWrap& p)
 {
-	p.DoPOD(m_Control);
-	p.DoPOD(m_Volume);
-	p.Do(m_SampleCounter);
-	p.Do(m_InterruptTiming);
-	p.Do(g_LastCPUTime);
-	p.Do(g_AISSampleRate);
-	p.Do(g_AIDSampleRate);
-	p.Do(g_CPUCyclesPerSample);
+  p.DoPOD(s_control);
+  p.DoPOD(s_volume);
+  p.Do(s_sample_counter);
+  p.Do(s_interrupt_timing);
+  p.Do(s_last_cpu_time);
+  p.Do(s_ais_sample_rate);
+  p.Do(s_aid_sample_rate);
+  p.Do(s_cpu_cycles_per_sample);
+
+  g_sound_stream->GetMixer()->DoState(p);
 }
 
 static void GenerateAudioInterrupt();
 static void UpdateInterrupts();
-static void IncreaseSampleCount(const u32 _uAmount);
+static void IncreaseSampleCount(u32 amount);
 static int GetAIPeriod();
-static int et_AI;
-static void Update(u64 userdata, s64 cyclesLate);
+static void Update(u64 userdata, s64 cycles_late);
+
+static CoreTiming::EventType* event_type_ai;
 
 void Init()
 {
-	m_Control.hex = 0;
-	m_Control.AISFR = AIS_48KHz;
-	m_Volume.hex = 0;
-	m_SampleCounter = 0;
-	m_InterruptTiming = 0;
+  s_control.hex = 0;
+  s_control.AISFR = AIS_48KHz;
+  s_volume.hex = 0;
+  s_sample_counter = 0;
+  s_interrupt_timing = 0;
 
-	g_LastCPUTime = 0;
-	g_CPUCyclesPerSample = 0xFFFFFFFFFFFULL;
+  s_last_cpu_time = 0;
+  s_cpu_cycles_per_sample = 0xFFFFFFFFFFFULL;
 
-	g_AISSampleRate = 48000;
-	g_AIDSampleRate = 32000;
+  s_ais_sample_rate = Get48KHzSampleRate();
+  s_aid_sample_rate = Get32KHzSampleRate();
 
-	et_AI = CoreTiming::RegisterEvent("AICallback", Update);
+  event_type_ai = CoreTiming::RegisterEvent("AICallback", Update);
+
+  g_sound_stream->GetMixer()->SetDMAInputSampleRate(GetAIDSampleRate());
+  g_sound_stream->GetMixer()->SetStreamInputSampleRate(GetAISSampleRate());
 }
 
 void Shutdown()
@@ -158,170 +164,184 @@ void Shutdown()
 
 void RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 {
-	mmio->Register(base | AI_CONTROL_REGISTER,
-		MMIO::DirectRead<u32>(&m_Control.hex),
-		MMIO::ComplexWrite<u32>([](u32, u32 val) {
-			AICR tmpAICtrl(val);
+  mmio->Register(
+      base | AI_CONTROL_REGISTER, MMIO::DirectRead<u32>(&s_control.hex),
+      MMIO::ComplexWrite<u32>([](u32, u32 val) {
+        const AICR tmp_ai_ctrl(val);
 
+        if (s_control.AIINTMSK != tmp_ai_ctrl.AIINTMSK)
+        {
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "Change AIINTMSK to {}", tmp_ai_ctrl.AIINTMSK);
+          s_control.AIINTMSK = tmp_ai_ctrl.AIINTMSK;
+        }
 
-			if (m_Control.AIINTMSK != tmpAICtrl.AIINTMSK)
-			{
-				DEBUG_LOG(AUDIO_INTERFACE, "Change AIINTMSK to %d", tmpAICtrl.AIINTMSK);
-				m_Control.AIINTMSK = tmpAICtrl.AIINTMSK;
-			}
+        if (s_control.AIINTVLD != tmp_ai_ctrl.AIINTVLD)
+        {
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "Change AIINTVLD to {}", tmp_ai_ctrl.AIINTVLD);
+          s_control.AIINTVLD = tmp_ai_ctrl.AIINTVLD;
+        }
 
-			if (m_Control.AIINTVLD != tmpAICtrl.AIINTVLD)
-			{
-				DEBUG_LOG(AUDIO_INTERFACE, "Change AIINTVLD to %d", tmpAICtrl.AIINTVLD);
-				m_Control.AIINTVLD = tmpAICtrl.AIINTVLD;
-			}
+        // Set frequency of streaming audio
+        if (tmp_ai_ctrl.AISFR != s_control.AISFR)
+        {
+          // AISFR rates below are intentionally inverted wrt yagcd
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "Change AISFR to {}",
+                        tmp_ai_ctrl.AISFR ? "48khz" : "32khz");
+          s_control.AISFR = tmp_ai_ctrl.AISFR;
+          s_ais_sample_rate = tmp_ai_ctrl.AISFR ? Get48KHzSampleRate() : Get32KHzSampleRate();
+          g_sound_stream->GetMixer()->SetStreamInputSampleRate(s_ais_sample_rate);
+          s_cpu_cycles_per_sample = SystemTimers::GetTicksPerSecond() / s_ais_sample_rate;
+        }
+        // Set frequency of DMA
+        if (tmp_ai_ctrl.AIDFR != s_control.AIDFR)
+        {
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "Change AIDFR to {}",
+                        tmp_ai_ctrl.AIDFR ? "32khz" : "48khz");
+          s_control.AIDFR = tmp_ai_ctrl.AIDFR;
+          s_aid_sample_rate = tmp_ai_ctrl.AIDFR ? Get32KHzSampleRate() : Get48KHzSampleRate();
+          g_sound_stream->GetMixer()->SetDMAInputSampleRate(s_aid_sample_rate);
+        }
 
-			// Set frequency of streaming audio
-			if (tmpAICtrl.AISFR != m_Control.AISFR)
-			{
-				// AISFR rates below are intentionally inverted wrt yagcd
-				DEBUG_LOG(AUDIO_INTERFACE, "Change AISFR to %s", tmpAICtrl.AISFR ? "48khz":"32khz");
-				m_Control.AISFR = tmpAICtrl.AISFR;
-				g_AISSampleRate = tmpAICtrl.AISFR ? 48000 : 32000;
-				g_sound_stream->GetMixer()->SetStreamInputSampleRate(g_AISSampleRate);
-				g_CPUCyclesPerSample = SystemTimers::GetTicksPerSecond() / g_AISSampleRate;
-			}
-			// Set frequency of DMA
-			if (tmpAICtrl.AIDFR != m_Control.AIDFR)
-			{
-				DEBUG_LOG(AUDIO_INTERFACE, "Change AIDFR to %s", tmpAICtrl.AIDFR ? "32khz":"48khz");
-				m_Control.AIDFR = tmpAICtrl.AIDFR;
-				g_AIDSampleRate = tmpAICtrl.AIDFR ? 32000 : 48000;
-				g_sound_stream->GetMixer()->SetDMAInputSampleRate(g_AIDSampleRate);
-			}
+        // Streaming counter
+        if (tmp_ai_ctrl.PSTAT != s_control.PSTAT)
+        {
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "{} streaming audio",
+                        tmp_ai_ctrl.PSTAT ? "start" : "stop");
+          s_control.PSTAT = tmp_ai_ctrl.PSTAT;
+          s_last_cpu_time = CoreTiming::GetTicks();
 
+          CoreTiming::RemoveEvent(event_type_ai);
+          CoreTiming::ScheduleEvent(GetAIPeriod(), event_type_ai);
+        }
 
-			// Streaming counter
-			if (tmpAICtrl.PSTAT != m_Control.PSTAT)
-			{
-				DEBUG_LOG(AUDIO_INTERFACE, "%s streaming audio", tmpAICtrl.PSTAT ? "start":"stop");
-				m_Control.PSTAT = tmpAICtrl.PSTAT;
-				g_LastCPUTime = CoreTiming::GetTicks();
+        // AI Interrupt
+        if (tmp_ai_ctrl.AIINT)
+        {
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "Clear AIS Interrupt");
+          s_control.AIINT = 0;
+        }
 
-				CoreTiming::RemoveEvent(et_AI);
-				CoreTiming::ScheduleEvent(GetAIPeriod(), et_AI);
-			}
+        // Sample Count Reset
+        if (tmp_ai_ctrl.SCRESET)
+        {
+          DEBUG_LOG_FMT(AUDIO_INTERFACE, "Reset AIS sample counter");
+          s_sample_counter = 0;
 
-			// AI Interrupt
-			if (tmpAICtrl.AIINT)
-			{
-				DEBUG_LOG(AUDIO_INTERFACE, "Clear AIS Interrupt");
-				m_Control.AIINT = 0;
-			}
+          s_last_cpu_time = CoreTiming::GetTicks();
+        }
 
-			// Sample Count Reset
-			if (tmpAICtrl.SCRESET)
-			{
-				DEBUG_LOG(AUDIO_INTERFACE, "Reset AIS sample counter");
-				m_SampleCounter = 0;
+        UpdateInterrupts();
+      }));
 
-				g_LastCPUTime = CoreTiming::GetTicks();
-			}
+  mmio->Register(base | AI_VOLUME_REGISTER, MMIO::DirectRead<u32>(&s_volume.hex),
+                 MMIO::ComplexWrite<u32>([](u32, u32 val) {
+                   s_volume.hex = val;
+                   g_sound_stream->GetMixer()->SetStreamingVolume(s_volume.left, s_volume.right);
+                 }));
 
-			UpdateInterrupts();
-		})
-	);
+  mmio->Register(base | AI_SAMPLE_COUNTER, MMIO::ComplexRead<u32>([](u32) {
+                   return s_sample_counter +
+                          static_cast<u32>((CoreTiming::GetTicks() - s_last_cpu_time) /
+                                           s_cpu_cycles_per_sample);
+                 }),
+                 MMIO::ComplexWrite<u32>([](u32, u32 val) {
+                   s_sample_counter = val;
+                   s_last_cpu_time = CoreTiming::GetTicks();
+                   CoreTiming::RemoveEvent(event_type_ai);
+                   CoreTiming::ScheduleEvent(GetAIPeriod(), event_type_ai);
+                 }));
 
-	mmio->Register(base | AI_VOLUME_REGISTER,
-		MMIO::DirectRead<u32>(&m_Volume.hex),
-		MMIO::ComplexWrite<u32>([](u32, u32 val) {
-			m_Volume.hex = val;
-			g_sound_stream->GetMixer()->SetStreamingVolume(m_Volume.left, m_Volume.right);
-		})
-	);
-
-	mmio->Register(base | AI_SAMPLE_COUNTER,
-		MMIO::ComplexRead<u32>([](u32) {
-			return m_SampleCounter + static_cast<u32>((CoreTiming::GetTicks() - g_LastCPUTime) / g_CPUCyclesPerSample);
-		}),
-		MMIO::ComplexWrite<u32>([](u32, u32 val) {
-			m_SampleCounter = val;
-			g_LastCPUTime = CoreTiming::GetTicks();
-			CoreTiming::RemoveEvent(et_AI);
-			CoreTiming::ScheduleEvent(GetAIPeriod(), et_AI);
-		})
-	);
-
-	mmio->Register(base | AI_INTERRUPT_TIMING,
-		MMIO::DirectRead<u32>(&m_InterruptTiming),
-		MMIO::ComplexWrite<u32>([](u32, u32 val) {
-			DEBUG_LOG(AUDIO_INTERFACE, "AI_INTERRUPT_TIMING=%08x@%08x", val, PowerPC::ppcState.pc);
-			m_InterruptTiming = val;
-			CoreTiming::RemoveEvent(et_AI);
-			CoreTiming::ScheduleEvent(GetAIPeriod(), et_AI);
-		})
-	);
+  mmio->Register(base | AI_INTERRUPT_TIMING, MMIO::DirectRead<u32>(&s_interrupt_timing),
+                 MMIO::ComplexWrite<u32>([](u32, u32 val) {
+                   DEBUG_LOG_FMT(AUDIO_INTERFACE, "AI_INTERRUPT_TIMING={:08x} at PC: {:08x}", val,
+                                 PowerPC::ppcState.pc);
+                   s_interrupt_timing = val;
+                   CoreTiming::RemoveEvent(event_type_ai);
+                   CoreTiming::ScheduleEvent(GetAIPeriod(), event_type_ai);
+                 }));
 }
 
 static void UpdateInterrupts()
 {
-	ProcessorInterface::SetInterrupt(
-		ProcessorInterface::INT_CAUSE_AI, m_Control.AIINT & m_Control.AIINTMSK);
+  ProcessorInterface::SetInterrupt(ProcessorInterface::INT_CAUSE_AI,
+                                   s_control.AIINT & s_control.AIINTMSK);
 }
 
 static void GenerateAudioInterrupt()
 {
-	m_Control.AIINT = 1;
-	UpdateInterrupts();
+  s_control.AIINT = 1;
+  UpdateInterrupts();
 }
 
 void GenerateAISInterrupt()
 {
-	GenerateAudioInterrupt();
+  GenerateAudioInterrupt();
 }
 
-static void IncreaseSampleCount(const u32 _iAmount)
+static void IncreaseSampleCount(const u32 amount)
 {
-	if (m_Control.PSTAT)
-	{
-		u32 old_SampleCounter = m_SampleCounter + 1;
-		m_SampleCounter += _iAmount;
+  if (s_control.PSTAT)
+  {
+    const u32 old_sample_counter = s_sample_counter + 1;
+    s_sample_counter += amount;
 
-		if ((m_InterruptTiming - old_SampleCounter) <= (m_SampleCounter - old_SampleCounter))
-		{
-			DEBUG_LOG(AUDIO_INTERFACE, "GenerateAudioInterrupt %08x:%08x @ %08x m_Control.AIINTVLD=%d", m_SampleCounter, m_InterruptTiming, PowerPC::ppcState.pc, m_Control.AIINTVLD);
-			GenerateAudioInterrupt();
-		}
-	}
+    if ((s_interrupt_timing - old_sample_counter) <= (s_sample_counter - old_sample_counter))
+    {
+      DEBUG_LOG_FMT(AUDIO_INTERFACE,
+                    "GenerateAudioInterrupt {:08x}:{:08x} at PC {:08x} s_control.AIINTVLD={}",
+                    s_sample_counter, s_interrupt_timing, PowerPC::ppcState.pc, s_control.AIINTVLD);
+      GenerateAudioInterrupt();
+    }
+  }
 }
 
 bool IsPlaying()
 {
-	return (m_Control.PSTAT == 1);
+  return (s_control.PSTAT == 1);
 }
 
-unsigned int GetAIDSampleRate()
+u32 GetAIDSampleRate()
 {
-	return g_AIDSampleRate;
+  return s_aid_sample_rate;
 }
 
-static void Update(u64 userdata, s64 cyclesLate)
+u32 GetAISSampleRate()
 {
-	if (m_Control.PSTAT)
-	{
-		const u64 Diff = CoreTiming::GetTicks() - g_LastCPUTime;
-		if (Diff > g_CPUCyclesPerSample)
-		{
-			const u32 Samples = static_cast<u32>(Diff / g_CPUCyclesPerSample);
-			g_LastCPUTime += Samples * g_CPUCyclesPerSample;
-			IncreaseSampleCount(Samples);
-		}
-		CoreTiming::ScheduleEvent(GetAIPeriod() - cyclesLate, et_AI);
-	}
+  return s_ais_sample_rate;
+}
+
+u32 Get32KHzSampleRate()
+{
+  return SConfig::GetInstance().bWii ? 32000 : 32029;
+}
+
+u32 Get48KHzSampleRate()
+{
+  return SConfig::GetInstance().bWii ? 48000 : 48043;
+}
+
+static void Update(u64 userdata, s64 cycles_late)
+{
+  if (s_control.PSTAT)
+  {
+    const u64 diff = CoreTiming::GetTicks() - s_last_cpu_time;
+    if (diff > s_cpu_cycles_per_sample)
+    {
+      const u32 samples = static_cast<u32>(diff / s_cpu_cycles_per_sample);
+      s_last_cpu_time += samples * s_cpu_cycles_per_sample;
+      IncreaseSampleCount(samples);
+    }
+    CoreTiming::ScheduleEvent(GetAIPeriod() - cycles_late, event_type_ai);
+  }
 }
 
 int GetAIPeriod()
 {
-	u64 period = g_CPUCyclesPerSample * (m_InterruptTiming-m_SampleCounter);
-	u64 s_period = g_CPUCyclesPerSample * g_AISSampleRate;
-	if (period == 0)
-		return static_cast<int>(s_period);
-	return static_cast<int>(std::min(period, s_period));
+  u64 period = s_cpu_cycles_per_sample * (s_interrupt_timing - s_sample_counter);
+  u64 s_period = s_cpu_cycles_per_sample * s_ais_sample_rate;
+  if (period == 0)
+    return static_cast<int>(s_period);
+  return static_cast<int>(std::min(period, s_period));
 }
 
-} // end of namespace AudioInterface
+}  // end of namespace AudioInterface

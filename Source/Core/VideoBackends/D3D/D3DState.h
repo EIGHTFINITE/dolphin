@@ -4,296 +4,301 @@
 
 #pragma once
 
-#include <stack>
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 
 #include "Common/BitField.h"
 #include "Common/CommonTypes.h"
 #include "VideoBackends/D3D/D3DBase.h"
-#include "VideoCommon/BPMemory.h"
-
-struct ID3D11BlendState;
-struct ID3D11DepthStencilState;
-struct ID3D11RasterizerState;
+#include "VideoCommon/RenderState.h"
 
 namespace DX11
 {
-
-union RasterizerState
-{
-	BitField<0, 2, D3D11_CULL_MODE> cull_mode;
-
-	u32 packed;
-};
-
-union BlendState
-{
-	BitField<0, 1, u32> blend_enable;
-	BitField<1, 3, D3D11_BLEND_OP> blend_op;
-	BitField<4, 4, u32> write_mask;
-	BitField<8, 5, D3D11_BLEND> src_blend;
-	BitField<13, 5, D3D11_BLEND> dst_blend;
-	BitField<18, 1, u32> use_dst_alpha;
-
-	u32 packed;
-};
-
-union SamplerState
-{
-	BitField<0, 3, u64> min_filter;
-	BitField<3, 1, u64> mag_filter;
-	BitField<4, 8, u64> min_lod;
-	BitField<12, 8, u64> max_lod;
-	BitField<20, 8, s64> lod_bias;
-	BitField<28, 2, u64> wrap_s;
-	BitField<30, 2, u64> wrap_t;
-	BitField<32, 5, u64> max_anisotropy;
-
-	u64 packed;
-};
+class DXFramebuffer;
 
 class StateCache
 {
 public:
+  ~StateCache();
 
-	// Get existing or create new render state.
-	// Returned objects is owned by the cache and does not need to be released.
-	ID3D11SamplerState* Get(SamplerState state);
-	ID3D11BlendState* Get(BlendState state);
-	ID3D11RasterizerState* Get(RasterizerState state);
-	ID3D11DepthStencilState* Get(ZMode state);
+  // Get existing or create new render state.
+  // Returned objects is owned by the cache and does not need to be released.
+  ID3D11SamplerState* Get(SamplerState state);
+  ID3D11BlendState* Get(BlendingState state);
+  ID3D11RasterizerState* Get(RasterizationState state);
+  ID3D11DepthStencilState* Get(DepthState state);
 
-	// Release all cached states and clear hash tables.
-	void Clear();
+  // Convert RasterState primitive type to D3D11 primitive topology.
+  static D3D11_PRIMITIVE_TOPOLOGY GetPrimitiveTopology(PrimitiveType primitive);
 
 private:
-
-	std::unordered_map<u32, ID3D11DepthStencilState*> m_depth;
-	std::unordered_map<u32, ID3D11RasterizerState*> m_raster;
-	std::unordered_map<u32, ID3D11BlendState*> m_blend;
-	std::unordered_map<u64, ID3D11SamplerState*> m_sampler;
+  std::unordered_map<u32, ComPtr<ID3D11DepthStencilState>> m_depth;
+  std::unordered_map<u32, ComPtr<ID3D11RasterizerState>> m_raster;
+  std::unordered_map<u32, ComPtr<ID3D11BlendState>> m_blend;
+  std::unordered_map<SamplerState::StorageType, ComPtr<ID3D11SamplerState>> m_sampler;
+  std::mutex m_lock;
 };
 
 namespace D3D
 {
-
-template<typename T> class AutoState
-{
-public:
-	AutoState(const T* object);
-	AutoState(const AutoState<T> &source);
-	~AutoState();
-
-	const inline T* GetPtr() const { return state; }
-
-private:
-	const T* state;
-};
-
-typedef AutoState<ID3D11BlendState> AutoBlendState;
-typedef AutoState<ID3D11DepthStencilState> AutoDepthStencilState;
-typedef AutoState<ID3D11RasterizerState> AutoRasterizerState;
-
 class StateManager
 {
 public:
-	StateManager();
+  StateManager();
+  ~StateManager();
 
-	// call any of these to change the affected states
-	void PushBlendState(const ID3D11BlendState* state);
-	void PushDepthState(const ID3D11DepthStencilState* state);
-	void PushRasterizerState(const ID3D11RasterizerState* state);
+  void SetBlendState(ID3D11BlendState* state)
+  {
+    if (m_current.blendState != state)
+      m_dirtyFlags |= DirtyFlag_BlendState;
 
-	// call these after drawing
-	void PopBlendState();
-	void PopDepthState();
-	void PopRasterizerState();
+    m_pending.blendState = state;
+  }
 
-	void SetTexture(u32 index, ID3D11ShaderResourceView* texture)
-	{
-		if (m_current.textures[index] != texture)
-			m_dirtyFlags |= DirtyFlag_Texture0 << index;
+  void SetDepthState(ID3D11DepthStencilState* state)
+  {
+    if (m_current.depthState != state)
+      m_dirtyFlags |= DirtyFlag_DepthState;
 
-		m_pending.textures[index] = texture;
-	}
+    m_pending.depthState = state;
+  }
 
-	void SetSampler(u32 index, ID3D11SamplerState* sampler)
-	{
-		if (m_current.samplers[index] != sampler)
-			m_dirtyFlags |= DirtyFlag_Sampler0 << index;
+  void SetRasterizerState(ID3D11RasterizerState* state)
+  {
+    if (m_current.rasterizerState != state)
+      m_dirtyFlags |= DirtyFlag_RasterizerState;
 
-		m_pending.samplers[index] = sampler;
-	}
+    m_pending.rasterizerState = state;
+  }
 
-	void SetPixelConstants(ID3D11Buffer* buffer0, ID3D11Buffer* buffer1 = nullptr)
-	{
-		if (m_current.pixelConstants[0] != buffer0 || m_current.pixelConstants[1] != buffer1)
-			m_dirtyFlags |= DirtyFlag_PixelConstants;
+  void SetTexture(size_t index, ID3D11ShaderResourceView* texture)
+  {
+    if (m_current.textures[index] != texture)
+      m_dirtyFlags |= DirtyFlag_Texture0 << index;
 
-		m_pending.pixelConstants[0] = buffer0;
-		m_pending.pixelConstants[1] = buffer1;
-	}
+    m_pending.textures[index] = texture;
+  }
 
-	void SetVertexConstants(ID3D11Buffer* buffer)
-	{
-		if (m_current.vertexConstants != buffer)
-			m_dirtyFlags |= DirtyFlag_VertexConstants;
+  void SetSampler(size_t index, ID3D11SamplerState* sampler)
+  {
+    if (m_current.samplers[index] != sampler)
+      m_dirtyFlags |= DirtyFlag_Sampler0 << index;
 
-		m_pending.vertexConstants = buffer;
-	}
+    m_pending.samplers[index] = sampler;
+  }
 
-	void SetGeometryConstants(ID3D11Buffer* buffer)
-	{
-		if (m_current.geometryConstants != buffer)
-			m_dirtyFlags |= DirtyFlag_GeometryConstants;
+  void SetPixelConstants(ID3D11Buffer* buffer0, ID3D11Buffer* buffer1 = nullptr)
+  {
+    if (m_current.pixelConstants[0] != buffer0 || m_current.pixelConstants[1] != buffer1)
+      m_dirtyFlags |= DirtyFlag_PixelConstants;
 
-		m_pending.geometryConstants = buffer;
-	}
+    m_pending.pixelConstants[0] = buffer0;
+    m_pending.pixelConstants[1] = buffer1;
+  }
 
-	void SetVertexBuffer(ID3D11Buffer* buffer, u32 stride, u32 offset)
-	{
-		if (m_current.vertexBuffer != buffer ||
-			m_current.vertexBufferStride != stride ||
-			m_current.vertexBufferOffset != offset)
-			m_dirtyFlags |= DirtyFlag_VertexBuffer;
+  void SetVertexConstants(ID3D11Buffer* buffer)
+  {
+    if (m_current.vertexConstants != buffer)
+      m_dirtyFlags |= DirtyFlag_VertexConstants;
 
-		m_pending.vertexBuffer = buffer;
-		m_pending.vertexBufferStride = stride;
-		m_pending.vertexBufferOffset = offset;
-	}
+    m_pending.vertexConstants = buffer;
+  }
 
-	void SetIndexBuffer(ID3D11Buffer* buffer)
-	{
-		if (m_current.indexBuffer != buffer)
-			m_dirtyFlags |= DirtyFlag_IndexBuffer;
+  void SetGeometryConstants(ID3D11Buffer* buffer)
+  {
+    if (m_current.geometryConstants != buffer)
+      m_dirtyFlags |= DirtyFlag_GeometryConstants;
 
-		m_pending.indexBuffer = buffer;
-	}
+    m_pending.geometryConstants = buffer;
+  }
 
-	void SetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY topology)
-	{
-		if (m_current.topology != topology)
-			m_dirtyFlags |= DirtyFlag_InputAssembler;
+  void SetVertexBuffer(ID3D11Buffer* buffer, u32 stride, u32 offset)
+  {
+    if (m_current.vertexBuffer != buffer || m_current.vertexBufferStride != stride ||
+        m_current.vertexBufferOffset != offset)
+      m_dirtyFlags |= DirtyFlag_VertexBuffer;
 
-		m_pending.topology = topology;
-	}
+    m_pending.vertexBuffer = buffer;
+    m_pending.vertexBufferStride = stride;
+    m_pending.vertexBufferOffset = offset;
+  }
 
-	void SetInputLayout(ID3D11InputLayout* layout)
-	{
-		if (m_current.inputLayout != layout)
-			m_dirtyFlags |= DirtyFlag_InputAssembler;
+  void SetIndexBuffer(ID3D11Buffer* buffer)
+  {
+    if (m_current.indexBuffer != buffer)
+      m_dirtyFlags |= DirtyFlag_IndexBuffer;
 
-		m_pending.inputLayout = layout;
-	}
+    m_pending.indexBuffer = buffer;
+  }
 
-	void SetPixelShader(ID3D11PixelShader* shader)
-	{
-		if (m_current.pixelShader != shader)
-			m_dirtyFlags |= DirtyFlag_PixelShader;
+  void SetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY topology)
+  {
+    if (m_current.topology != topology)
+      m_dirtyFlags |= DirtyFlag_InputAssembler;
 
-		m_pending.pixelShader = shader;
-	}
+    m_pending.topology = topology;
+  }
 
-	void SetPixelShaderDynamic(ID3D11PixelShader* shader, ID3D11ClassInstance * const * classInstances, u32 classInstancesCount)
-	{
-		D3D::context->PSSetShader(shader, classInstances, classInstancesCount);
-		m_current.pixelShader = shader;
-		m_pending.pixelShader = shader;
-	}
+  void SetInputLayout(ID3D11InputLayout* layout)
+  {
+    if (m_current.inputLayout != layout)
+      m_dirtyFlags |= DirtyFlag_InputAssembler;
 
-	void SetVertexShader(ID3D11VertexShader* shader)
-	{
-		if (m_current.vertexShader != shader)
-			m_dirtyFlags |= DirtyFlag_VertexShader;
+    m_pending.inputLayout = layout;
+  }
 
-		m_pending.vertexShader = shader;
-	}
+  void SetPixelShader(ID3D11PixelShader* shader)
+  {
+    if (m_current.pixelShader != shader)
+      m_dirtyFlags |= DirtyFlag_PixelShader;
 
-	void SetGeometryShader(ID3D11GeometryShader* shader)
-	{
-		if (m_current.geometryShader != shader)
-			m_dirtyFlags |= DirtyFlag_GeometryShader;
+    m_pending.pixelShader = shader;
+  }
 
-		m_pending.geometryShader = shader;
-	}
+  void SetPixelShaderDynamic(ID3D11PixelShader* shader, ID3D11ClassInstance* const* classInstances,
+                             u32 classInstancesCount)
+  {
+    D3D::context->PSSetShader(shader, classInstances, classInstancesCount);
+    m_current.pixelShader = shader;
+    m_pending.pixelShader = shader;
+  }
 
-	// removes currently set texture from all slots, returns mask of previously bound slots
-	u32 UnsetTexture(ID3D11ShaderResourceView* srv);
-	void SetTextureByMask(u32 textureSlotMask, ID3D11ShaderResourceView* srv);
+  void SetVertexShader(ID3D11VertexShader* shader)
+  {
+    if (m_current.vertexShader != shader)
+      m_dirtyFlags |= DirtyFlag_VertexShader;
 
-	// call this immediately before any drawing operation or to explicitly apply pending resource state changes
-	void Apply();
+    m_pending.vertexShader = shader;
+  }
+
+  void SetGeometryShader(ID3D11GeometryShader* shader)
+  {
+    if (m_current.geometryShader != shader)
+      m_dirtyFlags |= DirtyFlag_GeometryShader;
+
+    m_pending.geometryShader = shader;
+  }
+
+  void SetFramebuffer(DXFramebuffer* fb)
+  {
+    if (m_current.framebuffer != fb)
+      m_dirtyFlags |= DirtyFlag_Framebuffer;
+
+    m_pending.framebuffer = fb;
+  }
+
+  void SetOMUAV(ID3D11UnorderedAccessView* uav)
+  {
+    if (m_current.uav != uav)
+      m_dirtyFlags |= DirtyFlag_Framebuffer;
+
+    m_pending.uav = uav;
+  }
+
+  void SetIntegerRTV(bool enable)
+  {
+    if (m_current.use_integer_rtv != enable)
+      m_dirtyFlags |= DirtyFlag_Framebuffer;
+
+    m_pending.use_integer_rtv = enable;
+  }
+
+  // removes currently set texture from all slots, returns mask of previously bound slots
+  u32 UnsetTexture(ID3D11ShaderResourceView* srv);
+  void SetTextureByMask(u32 textureSlotMask, ID3D11ShaderResourceView* srv);
+  void ApplyTextures();
+
+  // call this immediately before any drawing operation or to explicitly apply pending resource
+  // state changes
+  void Apply();
+
+  // Binds constant buffers/textures/samplers to the compute shader stage.
+  // We don't track these explicitly because it's not often-used.
+  void SetComputeUAV(ID3D11UnorderedAccessView* uav);
+  void SetComputeShader(ID3D11ComputeShader* shader);
+  void SyncComputeBindings();
 
 private:
+  enum DirtyFlags
+  {
+    DirtyFlag_Texture0 = 1 << 0,
+    DirtyFlag_Texture1 = 1 << 1,
+    DirtyFlag_Texture2 = 1 << 2,
+    DirtyFlag_Texture3 = 1 << 3,
+    DirtyFlag_Texture4 = 1 << 4,
+    DirtyFlag_Texture5 = 1 << 5,
+    DirtyFlag_Texture6 = 1 << 6,
+    DirtyFlag_Texture7 = 1 << 7,
 
-	std::stack<AutoBlendState> m_blendStates;
-	std::stack<AutoDepthStencilState> m_depthStates;
-	std::stack<AutoRasterizerState> m_rasterizerStates;
+    DirtyFlag_Sampler0 = 1 << 8,
+    DirtyFlag_Sampler1 = 1 << 9,
+    DirtyFlag_Sampler2 = 1 << 10,
+    DirtyFlag_Sampler3 = 1 << 11,
+    DirtyFlag_Sampler4 = 1 << 12,
+    DirtyFlag_Sampler5 = 1 << 13,
+    DirtyFlag_Sampler6 = 1 << 14,
+    DirtyFlag_Sampler7 = 1 << 15,
 
-	ID3D11BlendState* m_currentBlendState;
-	ID3D11DepthStencilState* m_currentDepthState;
-	ID3D11RasterizerState* m_currentRasterizerState;
+    DirtyFlag_PixelConstants = 1 << 16,
+    DirtyFlag_VertexConstants = 1 << 17,
+    DirtyFlag_GeometryConstants = 1 << 18,
 
-	enum DirtyFlags
-	{
-		DirtyFlag_Texture0 = 1 << 0,
-		DirtyFlag_Texture1 = 1 << 1,
-		DirtyFlag_Texture2 = 1 << 2,
-		DirtyFlag_Texture3 = 1 << 3,
-		DirtyFlag_Texture4 = 1 << 4,
-		DirtyFlag_Texture5 = 1 << 5,
-		DirtyFlag_Texture6 = 1 << 6,
-		DirtyFlag_Texture7 = 1 << 7,
+    DirtyFlag_VertexBuffer = 1 << 19,
+    DirtyFlag_IndexBuffer = 1 << 20,
 
-		DirtyFlag_Sampler0 = 1 << 8,
-		DirtyFlag_Sampler1 = 1 << 9,
-		DirtyFlag_Sampler2 = 1 << 10,
-		DirtyFlag_Sampler3 = 1 << 11,
-		DirtyFlag_Sampler4 = 1 << 12,
-		DirtyFlag_Sampler5 = 1 << 13,
-		DirtyFlag_Sampler6 = 1 << 14,
-		DirtyFlag_Sampler7 = 1 << 15,
+    DirtyFlag_PixelShader = 1 << 21,
+    DirtyFlag_VertexShader = 1 << 22,
+    DirtyFlag_GeometryShader = 1 << 23,
 
-		DirtyFlag_PixelConstants = 1 << 16,
-		DirtyFlag_VertexConstants = 1 << 17,
-		DirtyFlag_GeometryConstants = 1 << 18,
+    DirtyFlag_InputAssembler = 1 << 24,
+    DirtyFlag_BlendState = 1 << 25,
+    DirtyFlag_DepthState = 1 << 26,
+    DirtyFlag_RasterizerState = 1 << 27,
+    DirtyFlag_Framebuffer = 1 << 28
+  };
 
-		DirtyFlag_VertexBuffer = 1 << 19,
-		DirtyFlag_IndexBuffer = 1 << 20,
+  u32 m_dirtyFlags = ~0u;
 
-		DirtyFlag_PixelShader = 1 << 21,
-		DirtyFlag_VertexShader = 1 << 22,
-		DirtyFlag_GeometryShader = 1 << 23,
+  struct Resources
+  {
+    std::array<ID3D11ShaderResourceView*, 8> textures;
+    std::array<ID3D11SamplerState*, 8> samplers;
+    std::array<ID3D11Buffer*, 2> pixelConstants;
+    ID3D11Buffer* vertexConstants;
+    ID3D11Buffer* geometryConstants;
+    ID3D11Buffer* vertexBuffer;
+    ID3D11Buffer* indexBuffer;
+    u32 vertexBufferStride;
+    u32 vertexBufferOffset;
+    D3D11_PRIMITIVE_TOPOLOGY topology;
+    ID3D11InputLayout* inputLayout;
+    ID3D11PixelShader* pixelShader;
+    ID3D11VertexShader* vertexShader;
+    ID3D11GeometryShader* geometryShader;
+    ID3D11BlendState* blendState;
+    ID3D11DepthStencilState* depthState;
+    ID3D11RasterizerState* rasterizerState;
+    DXFramebuffer* framebuffer;
+    ID3D11UnorderedAccessView* uav;
+    bool use_integer_rtv;
+  };
 
-		DirtyFlag_InputAssembler = 1 << 24,
-	};
+  Resources m_pending = {};
+  Resources m_current = {};
 
-	u32 m_dirtyFlags;
-
-	struct Resources
-	{
-		ID3D11ShaderResourceView* textures[8];
-		ID3D11SamplerState* samplers[8];
-		ID3D11Buffer* pixelConstants[2];
-		ID3D11Buffer* vertexConstants;
-		ID3D11Buffer* geometryConstants;
-		ID3D11Buffer* vertexBuffer;
-		ID3D11Buffer* indexBuffer;
-		u32 vertexBufferStride;
-		u32 vertexBufferOffset;
-		D3D11_PRIMITIVE_TOPOLOGY topology;
-		ID3D11InputLayout* inputLayout;
-		ID3D11PixelShader* pixelShader;
-		ID3D11VertexShader* vertexShader;
-		ID3D11GeometryShader* geometryShader;
-	};
-
-	Resources m_pending;
-	Resources m_current;
+  // Compute resources are synced with the graphics resources when we need them.
+  ID3D11Buffer* m_compute_constants = nullptr;
+  std::array<ID3D11ShaderResourceView*, 8> m_compute_textures{};
+  std::array<ID3D11SamplerState*, 8> m_compute_samplers{};
+  ID3D11UnorderedAccessView* m_compute_image = nullptr;
+  ID3D11ComputeShader* m_compute_shader = nullptr;
 };
 
-extern StateManager* stateman;
+extern std::unique_ptr<StateManager> stateman;
 
-}  // namespace
+}  // namespace D3D
 
 }  // namespace DX11
