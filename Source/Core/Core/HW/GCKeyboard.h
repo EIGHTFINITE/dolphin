@@ -7,17 +7,22 @@
 #include "Common/CommonTypes.h"
 
 class InputConfig;
+enum class KeyboardGroup;
 struct KeyboardStatus;
+
+namespace ControllerEmu
+{
+class ControlGroup;
+}
 
 namespace Keyboard
 {
-
 void Shutdown();
-void Initialize(void* const hwnd);
+void Initialize();
 void LoadConfig();
 
 InputConfig* GetConfig();
+ControllerEmu::ControlGroup* GetGroup(int port, KeyboardGroup group);
 
-void GetStatus(u8 port, KeyboardStatus* keyboard_status);
-
-}
+KeyboardStatus GetStatus(int port);
+}  // namespace Keyboard

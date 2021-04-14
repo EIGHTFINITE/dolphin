@@ -15,9 +15,11 @@
 
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <deque>
 #include <list>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -25,456 +27,305 @@
 #include <vector>
 
 #include "Common/Assert.h"
-#include "Common/Common.h"
 #include "Common/CommonTypes.h"
-#include "Common/FileUtil.h"
 #include "Common/Flag.h"
+#include "Common/Inline.h"
 #include "Common/Logging/Log.h"
 
-// ewww
-
-#ifndef __has_feature
- #define __has_feature(x) (0)
-#endif
-
-#if (__has_feature(is_trivially_copyable) && (defined(_LIBCPP_VERSION) || defined(__GLIBCXX__))) || (defined(__GNUC__) && __GNUC__ >= 5)
-#define IsTriviallyCopyable(T) std::is_trivially_copyable<typename std::remove_volatile<T>::type>::value
-#elif __GNUC__
-#define IsTriviallyCopyable(T) std::has_trivial_copy_constructor<T>::value
-#elif _MSC_VER
-// (shuffle2) see https://github.com/dolphin-emu/dolphin/pull/2218
-#define IsTriviallyCopyable(T) 1
-#else
-#error No version of is_trivially_copyable
-#endif
-
-
-template <class T>
-struct LinkedListItem : public T
-{
-	LinkedListItem<T> *next;
-};
+// XXX: Replace this with std::is_trivially_copyable<T> once we stop using volatile
+// on things that are put in savestates, as volatile types are not trivially copyable.
+template <typename T>
+constexpr bool IsTriviallyCopyable = std::is_trivially_copyable<std::remove_volatile_t<T>>::value;
 
 // Wrapper class
 class PointerWrap
 {
 public:
-	enum Mode
-	{
-		MODE_READ = 1, // load
-		MODE_WRITE, // save
-		MODE_MEASURE, // calculate size
-		MODE_VERIFY, // compare
-	};
+  enum Mode
+  {
+    MODE_READ = 1,  // load
+    MODE_WRITE,     // save
+    MODE_MEASURE,   // calculate size
+    MODE_VERIFY,    // compare
+  };
 
-	u8 **ptr;
-	Mode mode;
+  u8** ptr;
+  Mode mode;
 
 public:
-	PointerWrap(u8 **ptr_, Mode mode_) : ptr(ptr_), mode(mode_) {}
+  PointerWrap(u8** ptr_, Mode mode_) : ptr(ptr_), mode(mode_) {}
+  void SetMode(Mode mode_) { mode = mode_; }
+  Mode GetMode() const { return mode; }
+  template <typename K, class V>
+  void Do(std::map<K, V>& x)
+  {
+    u32 count = (u32)x.size();
+    Do(count);
 
-	void SetMode(Mode mode_) { mode = mode_; }
-	Mode GetMode() const { return mode; }
+    switch (mode)
+    {
+    case MODE_READ:
+      for (x.clear(); count != 0; --count)
+      {
+        std::pair<K, V> pair;
+        Do(pair.first);
+        Do(pair.second);
+        x.insert(pair);
+      }
+      break;
 
-	template <typename K, class V>
-	void Do(std::map<K, V>& x)
-	{
-		u32 count = (u32)x.size();
-		Do(count);
+    case MODE_WRITE:
+    case MODE_MEASURE:
+    case MODE_VERIFY:
+      for (auto& elem : x)
+      {
+        Do(elem.first);
+        Do(elem.second);
+      }
+      break;
+    }
+  }
 
-		switch (mode)
-		{
-		case MODE_READ:
-			for (x.clear(); count != 0; --count)
-			{
-				std::pair<K, V> pair;
-				Do(pair.first);
-				Do(pair.second);
-				x.insert(pair);
-			}
-			break;
+  template <typename V>
+  void Do(std::set<V>& x)
+  {
+    u32 count = (u32)x.size();
+    Do(count);
 
-		case MODE_WRITE:
-		case MODE_MEASURE:
-		case MODE_VERIFY:
-			for (auto& elem : x)
-			{
-				Do(elem.first);
-				Do(elem.second);
-			}
-			break;
-		}
-	}
+    switch (mode)
+    {
+    case MODE_READ:
+      for (x.clear(); count != 0; --count)
+      {
+        V value;
+        Do(value);
+        x.insert(value);
+      }
+      break;
 
-	template <typename V>
-	void Do(std::set<V>& x)
-	{
-		u32 count = (u32)x.size();
-		Do(count);
+    case MODE_WRITE:
+    case MODE_MEASURE:
+    case MODE_VERIFY:
+      for (const V& val : x)
+      {
+        Do(val);
+      }
+      break;
+    }
+  }
 
-		switch (mode)
-		{
-		case MODE_READ:
-			for (x.clear(); count != 0; --count)
-			{
-				V value;
-				Do(value);
-				x.insert(value);
-			}
-			break;
+  template <typename T>
+  void Do(std::vector<T>& x)
+  {
+    DoContiguousContainer(x);
+  }
 
-		case MODE_WRITE:
-		case MODE_MEASURE:
-		case MODE_VERIFY:
-			for (V& val : x)
-			{
-				Do(val);
-			}
-			break;
-		}
-	}
+  template <typename T>
+  void Do(std::list<T>& x)
+  {
+    DoContainer(x);
+  }
 
-	template <typename T>
-	void Do(std::vector<T>& x)
-	{
-		DoContainer(x);
-	}
+  template <typename T>
+  void Do(std::deque<T>& x)
+  {
+    DoContainer(x);
+  }
 
-	template <typename T>
-	void Do(std::list<T>& x)
-	{
-		DoContainer(x);
-	}
+  template <typename T>
+  void Do(std::basic_string<T>& x)
+  {
+    DoContiguousContainer(x);
+  }
 
-	template <typename T>
-	void Do(std::deque<T>& x)
-	{
-		DoContainer(x);
-	}
+  template <typename T, typename U>
+  void Do(std::pair<T, U>& x)
+  {
+    Do(x.first);
+    Do(x.second);
+  }
 
-	template <typename T>
-	void Do(std::basic_string<T>& x)
-	{
-		DoContainer(x);
-	}
+  template <typename T>
+  void Do(std::optional<T>& x)
+  {
+    bool present = x.has_value();
+    Do(present);
 
-	template <typename T, typename U>
-	void Do(std::pair<T, U>& x)
-	{
-		Do(x.first);
-		Do(x.second);
-	}
+    switch (mode)
+    {
+    case MODE_READ:
+      if (present)
+      {
+        x = std::make_optional<T>();
+        Do(x.value());
+      }
+      else
+      {
+        x = std::nullopt;
+      }
+      break;
 
-	template <typename T, std::size_t N>
-	void DoArray(std::array<T, N>& x)
-	{
-		DoArray(x.data(), (u32)x.size());
-	}
+    case MODE_WRITE:
+    case MODE_MEASURE:
+    case MODE_VERIFY:
+      if (present)
+        Do(x.value());
 
-	template <typename T>
-	void DoArray(T* x, u32 count)
-	{
-		static_assert(IsTriviallyCopyable(T), "Only sane for trivially copyable types");
-		DoVoid(x, count * sizeof(T));
-	}
+      break;
+    }
+  }
 
-	template <typename T, std::size_t N>
-	void DoArray(T (&arr)[N])
-	{
-		DoArray(arr, static_cast<u32>(N));
-	}
+  template <typename T, std::size_t N>
+  void DoArray(std::array<T, N>& x)
+  {
+    DoArray(x.data(), static_cast<u32>(x.size()));
+  }
 
-	void Do(Common::Flag& flag)
-	{
-		bool s = flag.IsSet();
-		Do(s);
-		if (mode == MODE_READ)
-			flag.Set(s);
-	}
+  template <typename T, typename std::enable_if_t<IsTriviallyCopyable<T>, int> = 0>
+  void DoArray(T* x, u32 count)
+  {
+    DoVoid(x, count * sizeof(T));
+  }
 
-	template<typename T>
-	void Do(std::atomic<T>& atomic)
-	{
-		T temp = atomic.load();
-		Do(temp);
-		if (mode == MODE_READ)
-			atomic.store(temp);
-	}
+  template <typename T, typename std::enable_if_t<!IsTriviallyCopyable<T>, int> = 0>
+  void DoArray(T* x, u32 count)
+  {
+    for (u32 i = 0; i < count; ++i)
+      Do(x[i]);
+  }
 
-	template <typename T>
-	void Do(T& x)
-	{
-		static_assert(IsTriviallyCopyable(T), "Only sane for trivially copyable types");
-		// Note:
-		// Usually we can just use x = **ptr, etc.  However, this doesn't work
-		// for unions containing BitFields (long story, stupid language rules)
-		// or arrays.  This will get optimized anyway.
-		DoVoid((void*)&x, sizeof(x));
-	}
+  template <typename T, std::size_t N>
+  void DoArray(T (&arr)[N])
+  {
+    DoArray(arr, static_cast<u32>(N));
+  }
 
-	template <typename T>
-	void DoPOD(T& x)
-	{
-		DoVoid((void*)&x, sizeof(x));
-	}
+  void Do(Common::Flag& flag)
+  {
+    bool s = flag.IsSet();
+    Do(s);
+    if (mode == MODE_READ)
+      flag.Set(s);
+  }
 
+  template <typename T>
+  void Do(std::atomic<T>& atomic)
+  {
+    T temp = atomic.load();
+    Do(temp);
+    if (mode == MODE_READ)
+      atomic.store(temp);
+  }
 
-	void Do(bool& x)
-	{
-		// bool's size can vary depending on platform, which can
-		// cause breakages. This treats all bools as if they were
-		// 8 bits in size.
-		u8 stable = static_cast<u8>(x);
+  template <typename T>
+  void Do(T& x)
+  {
+    static_assert(IsTriviallyCopyable<T>, "Only sane for trivially copyable types");
+    // Note:
+    // Usually we can just use x = **ptr, etc.  However, this doesn't work
+    // for unions containing BitFields (long story, stupid language rules)
+    // or arrays.  This will get optimized anyway.
+    DoVoid((void*)&x, sizeof(x));
+  }
 
-		Do(stable);
+  template <typename T>
+  void DoPOD(T& x)
+  {
+    DoVoid((void*)&x, sizeof(x));
+  }
 
-		if (mode == MODE_READ)
-			x = stable != 0;
-	}
+  void Do(bool& x)
+  {
+    // bool's size can vary depending on platform, which can
+    // cause breakages. This treats all bools as if they were
+    // 8 bits in size.
+    u8 stable = static_cast<u8>(x);
 
-	template <typename T>
-	void DoPointer(T*& x, T* const base)
-	{
-		// pointers can be more than 2^31 apart, but you're using this function wrong if you need that much range
-		ptrdiff_t offset = x - base;
-		Do(offset);
-		if (mode == MODE_READ)
-		{
-			x = base + offset;
-		}
-	}
+    Do(stable);
 
-	// Let's pretend std::list doesn't exist!
-	template <class T, LinkedListItem<T>* (*TNew)(), void (*TFree)(LinkedListItem<T>*), void (*TDo)(PointerWrap&, T*)>
-	void DoLinkedList(LinkedListItem<T>*& list_start, LinkedListItem<T>** list_end=0)
-	{
-		LinkedListItem<T>* list_cur = list_start;
-		LinkedListItem<T>* prev = nullptr;
+    if (mode == MODE_READ)
+      x = stable != 0;
+  }
 
-		while (true)
-		{
-			u8 shouldExist = !!list_cur;
-			Do(shouldExist);
-			if (shouldExist == 1)
-			{
-				LinkedListItem<T>* cur = list_cur ? list_cur : TNew();
-				TDo(*this, (T*)cur);
-				if (!list_cur)
-				{
-					if (mode == MODE_READ)
-					{
-						cur->next = nullptr;
-						list_cur = cur;
-						if (prev)
-							prev->next = cur;
-						else
-							list_start = cur;
-					}
-					else
-					{
-						TFree(cur);
-						continue;
-					}
-				}
-			}
-			else
-			{
-				if (mode == MODE_READ)
-				{
-					if (prev)
-						prev->next = nullptr;
-					if (list_end)
-						*list_end = prev;
-					if (list_cur)
-					{
-						if (list_start == list_cur)
-							list_start = nullptr;
-						do
-						{
-							LinkedListItem<T>* next = list_cur->next;
-							TFree(list_cur);
-							list_cur = next;
-						} while (list_cur);
-					}
-				}
-				break;
-			}
-			prev = list_cur;
-			list_cur = list_cur->next;
-		}
-	}
+  template <typename T>
+  void DoPointer(T*& x, T* const base)
+  {
+    // pointers can be more than 2^31 apart, but you're using this function wrong if you need that
+    // much range
+    ptrdiff_t offset = x - base;
+    Do(offset);
+    if (mode == MODE_READ)
+    {
+      x = base + offset;
+    }
+  }
 
-	void DoMarker(const std::string& prevName, u32 arbitraryNumber = 0x42)
-	{
-		u32 cookie = arbitraryNumber;
-		Do(cookie);
+  void DoMarker(const std::string& prevName, u32 arbitraryNumber = 0x42)
+  {
+    u32 cookie = arbitraryNumber;
+    Do(cookie);
 
-		if (mode == PointerWrap::MODE_READ && cookie != arbitraryNumber)
-		{
-			PanicAlertT("Error: After \"%s\", found %d (0x%X) instead of save marker %d (0x%X). Aborting savestate load...",
-				prevName.c_str(), cookie, cookie, arbitraryNumber, arbitraryNumber);
-			mode = PointerWrap::MODE_MEASURE;
-		}
-	}
+    if (mode == PointerWrap::MODE_READ && cookie != arbitraryNumber)
+    {
+      PanicAlertFmtT(
+          "Error: After \"{0}\", found {1} ({2:#x}) instead of save marker {3} ({4:#x}). Aborting "
+          "savestate load...",
+          prevName, cookie, cookie, arbitraryNumber, arbitraryNumber);
+      mode = PointerWrap::MODE_MEASURE;
+    }
+  }
+
+  template <typename T, typename Functor>
+  void DoEachElement(T& container, Functor member)
+  {
+    u32 size = static_cast<u32>(container.size());
+    Do(size);
+    container.resize(size);
+
+    for (auto& elem : container)
+      member(*this, elem);
+  }
 
 private:
-	template <typename T>
-	void DoContainer(T& x)
-	{
-		u32 size = (u32)x.size();
-		Do(size);
-		x.resize(size);
+  template <typename T>
+  void DoContiguousContainer(T& container)
+  {
+    u32 size = static_cast<u32>(container.size());
+    Do(size);
+    container.resize(size);
 
-		for (auto& elem : x)
-			Do(elem);
-	}
+    if (size > 0)
+      DoArray(&container[0], size);
+  }
 
-	__forceinline
-	void DoVoid(void* data, u32 size)
-	{
-		switch (mode)
-		{
-		case MODE_READ:
-			memcpy(data, *ptr, size);
-			break;
+  template <typename T>
+  void DoContainer(T& x)
+  {
+    DoEachElement(x, [](PointerWrap& p, typename T::value_type& elem) { p.Do(elem); });
+  }
 
-		case MODE_WRITE:
-			memcpy(*ptr, data, size);
-			break;
+  DOLPHIN_FORCE_INLINE void DoVoid(void* data, u32 size)
+  {
+    switch (mode)
+    {
+    case MODE_READ:
+      memcpy(data, *ptr, size);
+      break;
 
-		case MODE_MEASURE:
-			break;
+    case MODE_WRITE:
+      memcpy(*ptr, data, size);
+      break;
 
-		case MODE_VERIFY:
-			_dbg_assert_msg_(COMMON, !memcmp(data, *ptr, size),
-				"Savestate verification failure: buf %p != %p (size %u).\n",
-					data, *ptr, size);
-			break;
-		}
+    case MODE_MEASURE:
+      break;
 
-		*ptr += size;
-	}
-};
+    case MODE_VERIFY:
+      DEBUG_ASSERT_MSG(COMMON, !memcmp(data, *ptr, size),
+                       "Savestate verification failure: buf %p != %p (size %u).\n", data, *ptr,
+                       size);
+      break;
+    }
 
-// NOTE: this class is only used in DolphinWX/ISOFile.cpp for caching loaded
-// ISO data. It will be removed when DolphinWX is, so please don't use it.
-class CChunkFileReader
-{
-public:
-	// Load file template
-	template<class T>
-	static bool Load(const std::string& _rFilename, u32 _Revision, T& _class)
-	{
-		INFO_LOG(COMMON, "ChunkReader: Loading %s", _rFilename.c_str());
-
-		if (!File::Exists(_rFilename))
-			return false;
-
-		// Check file size
-		const u64 fileSize = File::GetSize(_rFilename);
-		static const u64 headerSize = sizeof(SChunkHeader);
-		if (fileSize < headerSize)
-		{
-			ERROR_LOG(COMMON, "ChunkReader: File too small");
-			return false;
-		}
-
-		File::IOFile pFile(_rFilename, "rb");
-		if (!pFile)
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Can't open file for reading");
-			return false;
-		}
-
-		// read the header
-		SChunkHeader header;
-		if (!pFile.ReadArray(&header, 1))
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Bad header size");
-			return false;
-		}
-
-		// Check revision
-		if (header.Revision != _Revision)
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Wrong file revision, got %d expected %d",
-				header.Revision, _Revision);
-			return false;
-		}
-
-		// get size
-		const u32 sz = (u32)(fileSize - headerSize);
-		if (header.ExpectedSize != sz)
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Bad file size, got %d expected %d",
-				sz, header.ExpectedSize);
-			return false;
-		}
-
-		// read the state
-		std::vector<u8> buffer(sz);
-		if (!pFile.ReadArray(&buffer[0], sz))
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Error reading file");
-			return false;
-		}
-
-		u8* ptr = &buffer[0];
-		PointerWrap p(&ptr, PointerWrap::MODE_READ);
-		_class.DoState(p);
-
-		INFO_LOG(COMMON, "ChunkReader: Done loading %s", _rFilename.c_str());
-		return true;
-	}
-
-	// Save file template
-	template<class T>
-	static bool Save(const std::string& _rFilename, u32 _Revision, T& _class)
-	{
-		INFO_LOG(COMMON, "ChunkReader: Writing %s", _rFilename.c_str());
-		File::IOFile pFile(_rFilename, "wb");
-		if (!pFile)
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Error opening file for write");
-			return false;
-		}
-
-		// Get data
-		u8* ptr = nullptr;
-		PointerWrap p(&ptr, PointerWrap::MODE_MEASURE);
-		_class.DoState(p);
-		size_t const sz = (size_t)ptr;
-		std::vector<u8> buffer(sz);
-		ptr = &buffer[0];
-		p.SetMode(PointerWrap::MODE_WRITE);
-		_class.DoState(p);
-
-		// Create header
-		SChunkHeader header;
-		header.Revision = _Revision;
-		header.ExpectedSize = (u32)sz;
-
-		// Write to file
-		if (!pFile.WriteArray(&header, 1))
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Failed writing header");
-			return false;
-		}
-
-		if (!pFile.WriteArray(&buffer[0], sz))
-		{
-			ERROR_LOG(COMMON, "ChunkReader: Failed writing data");
-			return false;
-		}
-
-		INFO_LOG(COMMON, "ChunkReader: Done writing %s", _rFilename.c_str());
-		return true;
-	}
-
-private:
-	struct SChunkHeader
-	{
-		u32 Revision;
-		u32 ExpectedSize;
-	};
+    *ptr += size;
+  }
 };

@@ -5,14 +5,18 @@
 #pragma once
 
 #include "Common/CommonTypes.h"
+#include "VideoCommon/VertexLoader.h"
+
+enum class VertexComponentFormat;
+enum class ComponentFormat;
+enum class CoordComponentCount;
 
 class VertexLoader_Position
 {
 public:
-	// GetSize
-	static unsigned int GetSize(u64 _type, unsigned int _format, unsigned int _elements);
+  static u32 GetSize(VertexComponentFormat type, ComponentFormat format,
+                     CoordComponentCount elements);
 
-	// GetFunction
-	static TPipelineFunction GetFunction(u64 _type, unsigned int _format, unsigned int _elements);
+  static TPipelineFunction GetFunction(VertexComponentFormat type, ComponentFormat format,
+                                       CoordComponentCount elements);
 };
-
