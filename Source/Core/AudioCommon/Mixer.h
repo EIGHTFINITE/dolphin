@@ -1,86 +1,184 @@
 // Copyright 2009 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <cmath>
 
+#include "AudioCommon/SurroundDecoder.h"
 #include "AudioCommon/WaveFile.h"
 #include "Common/CommonTypes.h"
+#include "Common/Config/Config.h"
 
-class CMixer final
+class PointerWrap;
+
+class Mixer final
 {
 public:
-	explicit CMixer(unsigned int BackendSampleRate);
-	~CMixer();
+  explicit Mixer(u32 BackendSampleRate);
+  ~Mixer();
 
-	// Called from audio threads
-	unsigned int Mix(short* samples, unsigned int numSamples, bool consider_framelimit = true);
+  void DoState(PointerWrap& p);
 
-	// Called from main thread
-	void PushSamples(const short* samples, unsigned int num_samples);
-	void PushStreamingSamples(const short* samples, unsigned int num_samples);
-	void PushWiimoteSpeakerSamples(const short* samples, unsigned int num_samples, unsigned int sample_rate);
-	unsigned int GetSampleRate() const { return m_sampleRate; }
+  // Called from audio threads
+  std::size_t Mix(s16* samples, std::size_t numSamples);
+  std::size_t MixSurround(float* samples, std::size_t num_samples);
 
-	void SetDMAInputSampleRate(unsigned int rate);
-	void SetStreamInputSampleRate(unsigned int rate);
-	void SetStreamingVolume(unsigned int lvolume, unsigned int rvolume);
-	void SetWiimoteSpeakerVolume(unsigned int lvolume, unsigned int rvolume);
+  // Called from main thread
+  void PushSamples(const s16* samples, std::size_t num_samples);
+  void PushStreamingSamples(const s16* samples, std::size_t num_samples);
+  void PushWiimoteSpeakerSamples(const s16* samples, std::size_t num_samples,
+                                 u32 sample_rate_divisor);
+  void PushSkylanderPortalSamples(const u8* samples, std::size_t num_samples);
+  void PushGBASamples(std::size_t device_number, const s16* samples, std::size_t num_samples);
 
-	void StartLogDTKAudio(const std::string& filename);
-	void StopLogDTKAudio();
+  u32 GetSampleRate() const { return m_output_sample_rate; }
 
-	void StartLogDSPAudio(const std::string& filename);
-	void StopLogDSPAudio();
+  void SetDMAInputSampleRateDivisor(u32 rate_divisor);
+  void SetStreamInputSampleRateDivisor(u32 rate_divisor);
+  void SetGBAInputSampleRateDivisors(std::size_t device_number, u32 rate_divisor);
 
-	float GetCurrentSpeed() const { return m_speed.load(); }
-	void UpdateSpeed(float val) { m_speed.store(val); }
+  void SetStreamingVolume(u32 lvolume, u32 rvolume);
+  void SetWiimoteSpeakerVolume(u32 lvolume, u32 rvolume);
+  void SetGBAVolume(std::size_t device_number, u32 lvolume, u32 rvolume);
+
+  void StartLogDTKAudio(const std::string& filename);
+  void StopLogDTKAudio();
+
+  void StartLogDSPAudio(const std::string& filename);
+  void StopLogDSPAudio();
+
+  // 54000000 doesn't work here as it doesn't evenly divide with 32000, but 108000000 does
+  static constexpr u64 FIXED_SAMPLE_RATE_DIVIDEND = 54000000 * 2;
 
 private:
-	static constexpr u32   MAX_SAMPLES    = 1024 * 4; // 128 ms
-	static constexpr u32   INDEX_MASK     = MAX_SAMPLES * 2 - 1;
-	static constexpr int   MAX_FREQ_SHIFT = 200; // Per 32000 Hz
-	static constexpr float CONTROL_FACTOR = 0.2f;
-	static constexpr u32   CONTROL_AVG    = 32; // In freq_shift per FIFO size offset
+  const std::size_t SURROUND_CHANNELS = 6;
 
-	class MixerFifo final
-	{
-	public:
-		MixerFifo(CMixer* mixer, unsigned sample_rate)
-			: m_mixer(mixer)
-			, m_input_sample_rate(sample_rate)
-		{
-		}
-		void PushSamples(const short* samples, unsigned int num_samples);
-		unsigned int Mix(short* samples, unsigned int numSamples, bool consider_framelimit = true);
-		void SetInputSampleRate(unsigned int rate);
-		void SetVolume(unsigned int lvolume, unsigned int rvolume);
-	private:
-		CMixer* m_mixer;
-		unsigned m_input_sample_rate;
-		std::array<short, MAX_SAMPLES * 2> m_buffer{};
-		std::atomic<u32> m_indexW{0};
-		std::atomic<u32> m_indexR{0};
-		// Volume ranges from 0-256
-		std::atomic<s32> m_LVolume{256};
-		std::atomic<s32> m_RVolume{256};
-		float m_numLeftI = 0.0f;
-		u32 m_frac = 0;
-	};
-	MixerFifo m_dma_mixer{this, 32000};
-	MixerFifo m_streaming_mixer{this, 48000};
-	MixerFifo m_wiimote_speaker_mixer{this, 3000};
-	unsigned int m_sampleRate;
+  class MixerFifo final
+  {
+    static constexpr std::size_t GRANULE_QUEUE_SIZE = 20;
 
-	WaveFileWriter m_wave_writer_dtk;
-	WaveFileWriter m_wave_writer_dsp;
+    template <typename T>
+    static s16 ToShort(const T x)
+    {
+      return static_cast<s16>(std::clamp<T>(x, static_cast<T>(std::numeric_limits<s16>::min()),
+                                            static_cast<T>(std::numeric_limits<s16>::max())));
+    }
+    struct StereoPair final
+    {
+      float l = 0.f;
+      float r = 0.f;
 
-	bool m_log_dtk_audio = false;
-	bool m_log_dsp_audio = false;
+      constexpr StereoPair() = default;
+      constexpr explicit StereoPair(float mono) : l(mono), r(mono) {}
+      constexpr StereoPair(float left, float right) : l(left), r(right) {}
+      constexpr StereoPair(s16 left, s16 right) : l(left), r(right) {}
 
-	// Current rate of emulation (1.0 = 100% speed)
-	std::atomic<float> m_speed{0.0f};
+      StereoPair operator+(const StereoPair& other) const
+      {
+        return StereoPair(l + other.l, r + other.r);
+      }
+
+      StereoPair& operator*=(const StereoPair& other)
+      {
+        l *= other.l;
+        r *= other.r;
+        return *this;
+      }
+    };
+
+    static constexpr std::size_t GRANULE_BUFFER_SIZE = 256;
+    static constexpr std::size_t GRANULE_BUFFER_MASK = GRANULE_BUFFER_SIZE - 1;
+    static constexpr std::size_t GRANULE_BUFFER_BITS = std::countr_one(GRANULE_BUFFER_MASK);
+    static constexpr std::size_t GRANULE_BUFFER_FRAC_BITS = 32 - GRANULE_BUFFER_BITS;
+
+    using GranuleBuffer = std::array<StereoPair, GRANULE_BUFFER_SIZE>;
+    class Granule final
+    {
+    public:
+      constexpr Granule() = default;
+      constexpr Granule(const GranuleBuffer& input, std::size_t start_index);
+
+      static StereoPair InterpStereoPair(const Granule& front, const Granule& back, u32 frac);
+
+      Granule& operator*=(const StereoPair& x)
+      {
+        for (auto& sample : m_buffer)
+          sample *= x;
+        return *this;
+      }
+
+    private:
+      GranuleBuffer m_buffer{};
+    };
+
+  public:
+    MixerFifo(Mixer* mixer, u32 sample_rate_divisor, bool little_endian)
+        : m_mixer(mixer), m_input_sample_rate_divisor(sample_rate_divisor),
+          m_little_endian(little_endian)
+    {
+    }
+    void DoState(PointerWrap& p);
+    void PushSamples(const s16* samples, std::size_t num_samples);
+    void Mix(s16* samples, std::size_t num_samples);
+    void SetInputSampleRateDivisor(u32 rate_divisor);
+    u32 GetInputSampleRateDivisor() const;
+    void SetVolume(u32 lvolume, u32 rvolume);
+    std::pair<s32, s32> GetVolume() const;
+
+  private:
+    Mixer* m_mixer;
+    u32 m_input_sample_rate_divisor;
+    bool m_little_endian;
+
+    std::size_t m_buffer_index = 0;
+    GranuleBuffer m_buffer{};
+
+    u32 m_current_index = 0;
+    Granule m_front, m_back;
+
+    std::array<Granule, GRANULE_QUEUE_SIZE> m_queue;
+    std::atomic<std::size_t> m_queue_head{0};
+    std::atomic<std::size_t> m_queue_tail{0};
+    std::atomic<bool> m_queue_looping{false};
+    std::size_t m_queue_fade_index = 0;
+
+    void Enqueue(const Granule& granule);
+    void Dequeue(Granule* granule);
+
+    // Volume ranges from 0-256
+    std::atomic<s32> m_LVolume{256};
+    std::atomic<s32> m_RVolume{256};
+
+    StereoPair m_quantization_error;
+  };
+
+  void RefreshConfig();
+
+  MixerFifo m_dma_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 32000, false};
+  MixerFifo m_streaming_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000, false};
+  MixerFifo m_wiimote_speaker_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 3000, true};
+  MixerFifo m_skylander_portal_mixer{this, FIXED_SAMPLE_RATE_DIVIDEND / 8000, true};
+  std::array<MixerFifo, 4> m_gba_mixers{MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000, true},
+                                        MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000, true},
+                                        MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000, true},
+                                        MixerFifo{this, FIXED_SAMPLE_RATE_DIVIDEND / 48000, true}};
+  u32 m_output_sample_rate;
+
+  AudioCommon::SurroundDecoder m_surround_decoder;
+
+  WaveFileWriter m_wave_writer_dtk;
+  WaveFileWriter m_wave_writer_dsp;
+
+  bool m_log_dtk_audio = false;
+  bool m_log_dsp_audio = false;
+
+  float m_config_emulation_speed;
+  bool m_audio_fill_gaps = true;
+
+  Config::ConfigChangedCallbackID m_config_changed_callback_id;
 };
