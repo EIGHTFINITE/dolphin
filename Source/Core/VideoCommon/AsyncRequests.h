@@ -1,99 +1,79 @@
 // Copyright 2015 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include <atomic>
 #include <condition_variable>
+#include <functional>
+#include <future>
 #include <mutex>
 #include <queue>
-#include <vector>
 
-#include "Common/CommonTypes.h"
+#include "Common/Flag.h"
+#include "Common/Functional.h"
 
 struct EfbPokeData;
+class PointerWrap;
 
 class AsyncRequests
 {
 public:
-	struct Event
-	{
-		enum Type
-		{
-			EFB_POKE_COLOR,
-			EFB_POKE_Z,
-			EFB_PEEK_COLOR,
-			EFB_PEEK_Z,
-			SWAP_EVENT,
-			BBOX_READ,
-			PERF_QUERY,
-		} type;
-		u64 time;
+  AsyncRequests();
 
-		union
-		{
-			struct
-			{
-				u16 x;
-				u16 y;
-				u32 data;
-			} efb_poke;
+  void PullEvents()
+  {
+    if (!m_empty.IsSet())
+      PullEventsInternal();
+  }
+  void WaitForEmptyQueue();
+  void SetEnable(bool enable);
+  void SetPassthrough(bool enable);
 
-			struct
-			{
-				u16 x;
-				u16 y;
-				u32* data;
-			} efb_peek;
+  template <typename F>
+  void PushEvent(F&& callback)
+  {
+    std::unique_lock<std::mutex> lock(m_mutex);
 
-			struct
-			{
-				u32 xfbAddr;
-				u32 fbWidth;
-				u32 fbStride;
-				u32 fbHeight;
-			} swap_event;
+    if (m_passthrough)
+    {
+      std::invoke(callback);
+      return;
+    }
 
-			struct
-			{
-				int index;
-				u16* data;
-			} bbox;
+    QueueEvent(Event{std::forward<F>(callback)});
+  }
 
-			struct
-			{
-			} perf_query;
-		};
-	};
+  template <typename F>
+  auto PushBlockingEvent(F&& callback) -> std::invoke_result_t<F>
+  {
+    std::unique_lock<std::mutex> lock(m_mutex);
 
-	AsyncRequests();
+    if (m_passthrough)
+      return std::invoke(callback);
 
-	void PullEvents()
-	{
-		if (!m_empty.load())
-			PullEventsInternal();
-	}
-	void PushEvent(const Event& event, bool blocking = false);
-	void SetEnable(bool enable);
-	void SetPassthrough(bool enable);
+    std::packaged_task task{std::forward<F>(callback)};
+    QueueEvent(Event{[&] { task(); }});
 
-	static AsyncRequests* GetInstance() { return &s_singleton; }
+    lock.unlock();
+    return task.get_future().get();
+  }
+
+  static AsyncRequests* GetInstance() { return &s_singleton; }
 
 private:
-	void PullEventsInternal();
-	void HandleEvent(const Event& e);
+  using Event = Common::MoveOnlyFunction<void()>;
 
-	static AsyncRequests s_singleton;
+  void QueueEvent(Event&& event);
 
-	std::atomic<bool> m_empty;
-	std::queue<Event> m_queue;
-	std::mutex m_mutex;
-	std::condition_variable m_cond;
+  void PullEventsInternal();
 
-	bool m_wake_me_up_again;
-	bool m_enable;
-	bool m_passthrough;
+  static AsyncRequests s_singleton;
 
-	std::vector<EfbPokeData> m_merged_efb_pokes;
+  Common::Flag m_empty;
+  std::queue<Event> m_queue;
+  std::mutex m_mutex;
+  std::condition_variable m_cond;
+
+  bool m_enable = false;
+  bool m_passthrough = true;
 };
