@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 2.8.12)
 
 project(enet)
 
@@ -6,6 +6,11 @@ project(enet)
 include(CheckFunctionExists)
 include(CheckStructHasMember)
 include(CheckTypeSize)
+
+if(HAIKU)
+    set(CMAKE_REQUIRED_LIBRARIES network)
+endif(HAIKU)
+
 check_function_exists("fcntl" HAS_FCNTL)
 check_function_exists("poll" HAS_POLL)
 check_function_exists("getaddrinfo" HAS_GETADDRINFO)
@@ -18,7 +23,11 @@ check_struct_has_member("struct msghdr" "msg_flags" "sys/types.h;sys/socket.h" H
 set(CMAKE_EXTRA_INCLUDE_FILES "sys/types.h" "sys/socket.h")
 check_type_size("socklen_t" HAS_SOCKLEN_T BUILTIN_TYPES_ONLY)
 unset(CMAKE_EXTRA_INCLUDE_FILES)
- 
+
+if(HAIKU)
+    unset(CMAKE_REQUIRED_LIBRARIES)
+endif()
+
 if(HAS_FCNTL)
     add_definitions(-DHAS_FCNTL=1)
 endif()
@@ -49,17 +58,47 @@ endif()
 if(HAS_SOCKLEN_T)
     add_definitions(-DHAS_SOCKLEN_T=1)
 endif()
- 
-include_directories(${PROJECT_SOURCE_DIR}/include)
- 
+
+set(INCLUDE_FILES_PREFIX enet/include/enet)
+set(INCLUDE_FILES
+    ${INCLUDE_FILES_PREFIX}/callbacks.h
+    ${INCLUDE_FILES_PREFIX}/enet.h
+    ${INCLUDE_FILES_PREFIX}/list.h
+    ${INCLUDE_FILES_PREFIX}/protocol.h
+    ${INCLUDE_FILES_PREFIX}/time.h
+    ${INCLUDE_FILES_PREFIX}/types.h
+    ${INCLUDE_FILES_PREFIX}/unix.h
+    ${INCLUDE_FILES_PREFIX}/utility.h
+    ${INCLUDE_FILES_PREFIX}/win32.h
+)
+
+set(SOURCE_FILES
+    enet/callbacks.c
+    enet/compress.c
+    enet/host.c
+    enet/list.c
+    enet/packet.c
+    enet/peer.c
+    enet/protocol.c
+    enet/unix.c
+    enet/win32.c)
+
+source_group(include FILES ${INCLUDE_FILES})
+source_group(source FILES ${SOURCE_FILES})
+
 add_library(enet STATIC
-        callbacks.c
-        compress.c
-        host.c
-        list.c
-        packet.c
-        peer.c
-        protocol.c
-        unix.c
-        win32.c
-    )
+    ${INCLUDE_FILES}
+    ${SOURCE_FILES}
+)
+target_include_directories(enet PUBLIC enet/include)
+
+dolphin_disable_warnings(enet)
+add_library(enet::enet ALIAS enet)
+
+if (MINGW)
+    target_link_libraries(enet winmm ws2_32)
+endif()
+
+if(HAIKU)
+    target_link_libraries(enet network)
+endif(HAIKU)
