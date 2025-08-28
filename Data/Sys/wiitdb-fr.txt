@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: FR_unique version: 20250826093544)
 R22J01 = FlingSmash
 R23P52 = Barbie et les Trois Mousquetaires
 R25PWR = LEGO Harry Potter : Années 1 à 4

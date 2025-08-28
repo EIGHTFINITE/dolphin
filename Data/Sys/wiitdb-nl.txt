@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: NL_unique version: 20250826093620)
 R23P52 = Barbie en De Drie Musketiers
 R25PWR = LEGO Harry Potter: Jaren 1-4
 R27X54 = Dora redt het Land van Kristal

@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: ES_unique version: 20250826093535)
 D2AJAF = Minna de Bouken! Family Trainer (Demo)
 DBBE18 = Beyblade: Metal Fusion - Battle Fortress (Demo)
 DCHJAF = We Cheer: Ohasta Produce ! Gentei Collabo Game Disc

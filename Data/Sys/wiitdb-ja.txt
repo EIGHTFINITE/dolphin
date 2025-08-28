@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: JA_unique version: 20250826093601)
 D2AJAF = みんなで冒険！ファミリートレーナー 体験版
 DABJ01 = マリオカートWii 体験版
 DAEJ8P = 428 ～封鎖された渋谷で～ 体験版
