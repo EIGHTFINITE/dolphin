@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: ES_unique version: 20250826093535)
 D2AJAF = Minna de Bouken! Family Trainer (Demo)
 DBBE18 = Beyblade: Metal Fusion - Battle Fortress (Demo)
 DCHJAF = We Cheer: Ohasta Produce ! Gentei Collabo Game Disc
@@ -1662,7 +1661,7 @@ MB6P = Shining Force II
 MBBE = Sonic the Hedgehog 2
 MBBP = Sonic the Hedgehog 2
 MBFE = Shinobi III: Return of the Ninja Master
-MBFP = Shinobi III: Return of the Ninja master
+MBFP = Shinobi III: Return of the Ninja Master
 MBIE = Landstalker: The Treasures of King Nole
 MBIP = Landstalker: The Treasures of King Nole
 MBJE = Ghouls'n Ghosts

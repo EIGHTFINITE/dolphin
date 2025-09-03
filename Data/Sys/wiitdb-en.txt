@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: EN version: 20250826093514)
 007E01 = Auto Erase Disc
 091E00 = Movie-Ch Install Disc Ver. A
 410E01 = Wii Back Up Disc Ver. 1.31
@@ -9360,7 +9359,7 @@ GLEE08 = Resident Evil 3: Nemesis
 GLEJ08 = Biohazard 3: Last Escape
 GLEP08 = Resident Evil 3: Nemesis
 GLGP41 = Largo Winch: Empire Under Threat
-GLHEG9 = & Aardman Flushed Away
+GLHEG9 = Flushed Away
 GLHPG9 = & Aardman Flushed Away
 GLIJA7 = Special Jinsei Game
 GLJJMS = Radirgy Generic

@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: DE_unique version: 20250826093526)
 R22J01 = FlingSmash
 R23P52 = Barbie und Die Drei Musketiere
 R25PWR = LEGO Harry Potter: Die Jahre 1-4
@@ -689,7 +688,7 @@ MAVP = Wonder Boy In Monster World
 MAXP = Alex Kidd In The Enchanted Castle
 MB6P = Shining Force II 
 MBBP = Sonic the Hedgehog 2
-MBFP = Shinobi III: Return of the Ninja master
+MBFP = Shinobi III: Return of the Ninja Master
 MBIP = Landstalker: Die Schätze von König Nolo
 MBJP = Ghouls'n Ghosts
 MBMP = Sonic the Hedgehog 3
