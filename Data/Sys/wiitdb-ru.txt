@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: RU_unique version: 20250826093636)
 R5IR4Q = История игрушек: Парк развлечений
 RMFE68 = AMF Bowling Pinbusters!
 RMFP68 = AMF Bowling Pinbusters!
