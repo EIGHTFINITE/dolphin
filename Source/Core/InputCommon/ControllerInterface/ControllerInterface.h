@@ -1,43 +1,59 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include <algorithm>
-#include <map>
-#include <sstream>
-#include <string>
-#include <vector>
+#include <atomic>
+#include <functional>
+#include <list>
+#include <memory>
+#include <mutex>
 
-#include "Common/CommonTypes.h"
-#include "Common/Thread.h"
-#include "InputCommon/ControllerInterface/Device.h"
-#include "InputCommon/ControllerInterface/ExpressionParser.h"
+#include "Common/Matrix.h"
+#include "Common/WindowSystemInfo.h"
+#include "InputCommon/ControllerInterface/CoreDevice.h"
+#include "InputCommon/ControllerInterface/InputBackend.h"
 
 // enable disable sources
 #ifdef _WIN32
-	#define CIFACE_USE_XINPUT
-	#define CIFACE_USE_DINPUT
+#define CIFACE_USE_WIN32
 #endif
-#if defined(HAVE_X11) && HAVE_X11
-	#define CIFACE_USE_XLIB
-	#if defined(HAVE_X11_XINPUT2) && HAVE_X11_XINPUT2
-		#define CIFACE_USE_X11_XINPUT2
-	#endif
+#ifdef HAVE_X11
+#define CIFACE_USE_XLIB
 #endif
 #if defined(__APPLE__)
-	#define CIFACE_USE_OSX
-#endif
-#if defined(HAVE_SDL) && HAVE_SDL
-	#define CIFACE_USE_SDL
+#define CIFACE_USE_OSX
 #endif
 #if defined(HAVE_LIBEVDEV) && defined(HAVE_LIBUDEV)
-	#define CIFACE_USE_EVDEV
+#define CIFACE_USE_EVDEV
 #endif
 #if defined(USE_PIPES)
-	#define CIFACE_USE_PIPES
+#define CIFACE_USE_PIPES
 #endif
+#define CIFACE_USE_DUALSHOCKUDPCLIENT
+#if defined(HAVE_SDL3)
+#define CIFACE_USE_SDL
+#endif
+#if defined(HAVE_HIDAPI)
+#define CIFACE_USE_STEAMDECK
+#endif
+
+namespace ciface
+{
+// A thread local "input channel" is maintained to handle the state of relative inputs.
+// This allows simultaneous use of relative inputs across different input contexts.
+// e.g. binding relative mouse movements to both GameCube controllers and FreeLook.
+// These operate at different rates and processing one would break the other without separate state.
+enum class InputChannel
+{
+  Host,
+  SerialInterface,
+  Bluetooth,
+  FreeLook,
+  Count,
+};
+
+}  // namespace ciface
 
 //
 // ControllerInterface
@@ -48,86 +64,115 @@
 class ControllerInterface : public ciface::Core::DeviceContainer
 {
 public:
+  using HotplugCallbackHandle = std::list<std::function<void()>>::iterator;
 
-	//
-	// ControlReference
-	//
-	// These are what you create to actually use the inputs, InputReference or OutputReference.
-	//
-	// After being bound to devices and controls with ControllerInterface::UpdateReference,
-	// each one can link to multiple devices and controls
-	// when you change a ControlReference's expression,
-	// you must use ControllerInterface::UpdateReference on it to rebind controls
-	//
-	class ControlReference
-	{
-		friend class ControllerInterface;
-	public:
-		virtual ControlState State(const ControlState state = 0) = 0;
-		virtual ciface::Core::Device::Control* Detect(const unsigned int ms, ciface::Core::Device* const device) = 0;
+  enum class WindowChangeReason
+  {
+    // Application is shutting down
+    Exit,
+    Other
+  };
 
-		ControlState range;
-		std::string  expression;
-		const bool   is_input;
-		ciface::ExpressionParser::ExpressionParseStatus parse_error;
+  enum class RefreshReason
+  {
+    // Only the window changed.
+    WindowChangeOnly,
+    // User requested, or any other internal reason (e.g. init).
+    // The window might have changed anyway.
+    Other
+  };
 
-		virtual ~ControlReference()
-		{
-			delete parsed_expression;
-		}
+  ControllerInterface() : m_is_init(false) {}
+  void Initialize(const WindowSystemInfo& wsi);
+  // Only call from one thread at a time.
+  void ChangeWindow(void* hwnd, WindowChangeReason reason = WindowChangeReason::Other);
+  // Can be called by any thread at any time (when initialized).
+  void RefreshDevices(RefreshReason reason = RefreshReason::Other);
+  void Shutdown();
+  bool AddDevice(std::shared_ptr<ciface::Core::Device> device);
+  // Removes all the devices the function returns true to.
+  // If all the devices shared ptrs need to be destroyed immediately,
+  // set force_devices_release to true.
+  void RemoveDevice(std::function<bool(const ciface::Core::Device*)> callback,
+                    bool force_devices_release = false);
+  // This is mandatory to use on device populations functions that can be called concurrently by
+  // more than one thread, or that are called by a single other thread.
+  // Without this, our devices list might end up in a mixed state.
+  void PlatformPopulateDevices(std::function<void()> callback);
+  bool IsInit() const { return m_is_init; }
+  void UpdateInput();
 
-		int BoundCount()
-		{
-			if (parsed_expression)
-				return parsed_expression->num_controls;
-			else
-				return 0;
-		}
+  // Set adjustment from the full render window aspect-ratio to the drawn aspect-ratio.
+  // Used to fit mouse cursor inputs to the relevant region of the render window.
+  void SetAspectRatioAdjustment(float);
 
-	protected:
-		ControlReference(const bool _is_input) : range(1), is_input(_is_input), parsed_expression(nullptr) {}
-		ciface::ExpressionParser::Expression *parsed_expression;
-	};
+  // Calculated from the aspect-ratio adjustment.
+  // Inputs based on window coordinates should be multiplied by this.
+  Common::Vec2 GetWindowInputScale() const;
 
-	//
-	// InputReference
-	//
-	// Control reference for inputs
-	//
-	class InputReference : public ControlReference
-	{
-	public:
-		InputReference() : ControlReference(true) {}
-		ControlState State(const ControlState state) override;
-		ciface::Core::Device::Control* Detect(const unsigned int ms, ciface::Core::Device* const device) override;
-	};
+  // Request that the mouse cursor should be centered in the render window at the next opportunity.
+  void SetMouseCenteringRequested(bool center);
 
-	//
-	// OutputReference
-	//
-	// Control reference for outputs
-	//
-	class OutputReference : public ControlReference
-	{
-	public:
-		OutputReference() : ControlReference(false) {}
-		ControlState State(const ControlState state) override;
-		ciface::Core::Device::Control* Detect(const unsigned int ms, ciface::Core::Device* const device) override;
-	};
+  bool IsMouseCenteringRequested() const;
 
-	ControllerInterface() : m_is_init(false), m_hwnd(nullptr) {}
+  HotplugCallbackHandle RegisterDevicesChangedCallback(std::function<void(void)> callback);
+  void UnregisterDevicesChangedCallback(const HotplugCallbackHandle& handle);
+  void InvokeDevicesChangedCallbacks() const;
 
-	void Initialize(void* const hwnd);
-	void Reinitialize();
-	void Shutdown();
-	bool IsInit() const { return m_is_init; }
+  static void SetCurrentInputChannel(ciface::InputChannel);
+  static ciface::InputChannel GetCurrentInputChannel();
 
-	void UpdateReference(ControlReference* control, const ciface::Core::DeviceQualifier& default_device) const;
-	void UpdateInput();
+  WindowSystemInfo GetWindowSystemInfo() const;
 
 private:
-	bool   m_is_init;
-	void*  m_hwnd;
+  void ClearDevices();
+
+  std::list<std::function<void()>> m_devices_changed_callbacks;
+  mutable std::recursive_mutex m_devices_population_mutex;
+  mutable std::mutex m_callbacks_mutex;
+  std::atomic<bool> m_is_init;
+  // This is now always protected by m_devices_population_mutex, so
+  // it doesn't really need to be a counter or atomic anymore (it could be a raw bool),
+  // but we keep it so for simplicity, in case we changed the design.
+  std::atomic<int> m_populating_devices_counter;
+  WindowSystemInfo m_wsi;
+  std::atomic<float> m_aspect_ratio_adjustment = 1;
+  std::atomic<bool> m_requested_mouse_centering = false;
+
+  std::vector<std::unique_ptr<ciface::InputBackend>> m_input_backends;
 };
+
+namespace ciface
+{
+template <typename T>
+class RelativeInputState
+{
+public:
+  void Update()
+  {
+    const auto channel = int(ControllerInterface::GetCurrentInputChannel());
+
+    m_value[channel] = m_delta[channel];
+    m_delta[channel] = {};
+  }
+
+  T GetValue() const
+  {
+    const auto channel = int(ControllerInterface::GetCurrentInputChannel());
+
+    return m_value[channel];
+  }
+
+  void Move(T delta)
+  {
+    for (auto& d : m_delta)
+      d += delta;
+  }
+
+private:
+  std::array<T, int(InputChannel::Count)> m_value;
+  std::array<T, int(InputChannel::Count)> m_delta;
+};
+}  // namespace ciface
 
 extern ControllerInterface g_controller_interface;
