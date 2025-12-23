@@ -1,18 +1,23 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
+#include "Common/CommonTypes.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
 
-class INITUCode : public UCodeInterface
+namespace DSP::HLE
+{
+class DSPHLE;
+
+class INITUCode final : public UCodeInterface
 {
 public:
-	INITUCode(DSPHLE *dsphle, u32 crc);
-	virtual ~INITUCode();
+  INITUCode(DSPHLE* dsphle, u32 crc);
 
-	void HandleMail(u32 mail) override;
-	void Update() override;
-	void Init();
+  void Initialize() override;
+  void HandleMail(u32 mail) override;
+  void Update() override;
+  void DoState(PointerWrap& p) override;
 };
+}  // namespace DSP::HLE

@@ -1,144 +1,120 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "VideoCommon/VertexLoader_TextCoord.h"
 
 #include <type_traits>
 
-#include "Common/CommonFuncs.h"
 #include "Common/CommonTypes.h"
-#include "VideoCommon/DataReader.h"
+#include "Common/Swap.h"
+
 #include "VideoCommon/VertexLoader.h"
-#include "VideoCommon/VertexLoader_TextCoord.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexLoaderUtils.h"
 
-template <int N>
-void LOG_TEX();
-
-template <>
-void LOG_TEX<1>()
+namespace
 {
-	// warning: mapping buffer should be disabled to use this
-	// PRIM_LOG("tex: %f, ", ((float*)g_vertex_manager_write_ptr)[-1]);
-}
-
-template <>
-void LOG_TEX<2>()
+void TexCoord_Read_Dummy(VertexLoader* loader)
 {
-	// warning: mapping buffer should be disabled to use this
-	// PRIM_LOG("tex: %f %f, ", ((float*)g_vertex_manager_write_ptr)[-2], ((float*)g_vertex_manager_write_ptr)[-1]);
-}
-
-static void TexCoord_Read_Dummy(VertexLoader* loader)
-{
-	loader->m_tcIndex++;
+  loader->m_tcIndex++;
 }
 
 template <typename T>
-float TCScale(T val, float scale)
+constexpr float TCScale(T val, float scale)
 {
-	return val * scale;
+  return val * scale;
 }
 
 template <>
-float TCScale(float val, float scale)
+constexpr float TCScale(float val, [[maybe_unused]] float scale)
 {
-	return val;
+  return val;
 }
 
 template <typename T, int N>
 void TexCoord_ReadDirect(VertexLoader* loader)
 {
-	auto const scale = loader->m_tcScale[loader->m_tcIndex];
-	DataReader dst(g_vertex_manager_write_ptr, nullptr);
-	DataReader src(g_video_buffer_read_ptr, nullptr);
+  const auto scale = loader->m_tcScale[loader->m_tcIndex];
 
-	for (int i = 0; i != N; ++i)
-		dst.Write(TCScale(src.Read<T>(), scale));
+  for (int i = 0; i != N; ++i)
+    DataWrite(TCScale(DataRead<T>(), scale));
 
-	g_vertex_manager_write_ptr = dst.GetPointer();
-	g_video_buffer_read_ptr = src.GetPointer();
-	LOG_TEX<N>();
-
-	++loader->m_tcIndex;
+  ++loader->m_tcIndex;
 }
 
 template <typename I, typename T, int N>
 void TexCoord_ReadIndex(VertexLoader* loader)
 {
-	static_assert(std::is_unsigned<I>::value, "Only unsigned I is sane!");
+  static_assert(std::is_unsigned<I>::value, "Only unsigned I is sane!");
 
-	auto const index = DataRead<I>();
-	auto const data = reinterpret_cast<const T*>(VertexLoaderManager::cached_arraybases[ARRAY_TEXCOORD0 + loader->m_tcIndex]
-	                + (index * g_main_cp_state.array_strides[ARRAY_TEXCOORD0 + loader->m_tcIndex]));
-	auto const scale = loader->m_tcScale[loader->m_tcIndex];
-	DataReader dst(g_vertex_manager_write_ptr, nullptr);
+  const auto index = DataRead<I>();
+  const auto data = reinterpret_cast<const T*>(
+      VertexLoaderManager::cached_arraybases[CPArray::TexCoord0 + loader->m_tcIndex] +
+      (index * g_main_cp_state.array_strides[CPArray::TexCoord0 + loader->m_tcIndex]));
+  const auto scale = loader->m_tcScale[loader->m_tcIndex];
 
-	for (int i = 0; i != N; ++i)
-		dst.Write(TCScale(Common::FromBigEndian(data[i]), scale));
+  for (int i = 0; i != N; ++i)
+    DataWrite(TCScale(Common::FromBigEndian(data[i]), scale));
 
-	g_vertex_manager_write_ptr = dst.GetPointer();
-	LOG_TEX<N>();
-	++loader->m_tcIndex;
+  ++loader->m_tcIndex;
 }
 
-static TPipelineFunction tableReadTexCoord[4][8][2] = {
-	{
-		{nullptr, nullptr,},
-		{nullptr, nullptr,},
-		{nullptr, nullptr,},
-		{nullptr, nullptr,},
-		{nullptr, nullptr,},
-	},
-	{
-		{TexCoord_ReadDirect<u8, 1>,  TexCoord_ReadDirect<u8, 2>,},
-		{TexCoord_ReadDirect<s8, 1>,   TexCoord_ReadDirect<s8, 2>,},
-		{TexCoord_ReadDirect<u16, 1>, TexCoord_ReadDirect<u16, 2>,},
-		{TexCoord_ReadDirect<s16, 1>,  TexCoord_ReadDirect<s16, 2>,},
-		{TexCoord_ReadDirect<float, 1>,  TexCoord_ReadDirect<float, 2>,},
-	},
-	{
-		{TexCoord_ReadIndex<u8, u8, 1>,  TexCoord_ReadIndex<u8, u8, 2>,},
-		{TexCoord_ReadIndex<u8, s8, 1>,   TexCoord_ReadIndex<u8, s8, 2>,},
-		{TexCoord_ReadIndex<u8, u16, 1>, TexCoord_ReadIndex<u8, u16, 2>,},
-		{TexCoord_ReadIndex<u8, s16, 1>,  TexCoord_ReadIndex<u8, s16, 2>,},
-		{TexCoord_ReadIndex<u8, float, 1>,  TexCoord_ReadIndex<u8, float, 2>,},
-	},
-	{
-		{TexCoord_ReadIndex<u16, u8, 1>,  TexCoord_ReadIndex<u16, u8, 2>,},
-		{TexCoord_ReadIndex<u16, s8, 1>,   TexCoord_ReadIndex<u16, s8, 2>,},
-		{TexCoord_ReadIndex<u16, u16, 1>, TexCoord_ReadIndex<u16, u16, 2>,},
-		{TexCoord_ReadIndex<u16, s16, 1>,  TexCoord_ReadIndex<u16, s16, 2>,},
-		{TexCoord_ReadIndex<u16, float, 1>,  TexCoord_ReadIndex<u16, float, 2>,},
-	},
+using ComponentCountRow = Common::EnumMap<TPipelineFunction, TexComponentCount::ST>;
+using ComponentFormatTable = Common::EnumMap<ComponentCountRow, ComponentFormat::InvalidFloat7>;
+using Table = Common::EnumMap<ComponentFormatTable, VertexComponentFormat::Index16>;
+
+constexpr Table s_table_read_tex_coord = {
+    ComponentFormatTable({
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+        ComponentCountRow(nullptr, nullptr),
+    }),
+    ComponentFormatTable({
+        ComponentCountRow(TexCoord_ReadDirect<u8, 1>, TexCoord_ReadDirect<u8, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<s8, 1>, TexCoord_ReadDirect<s8, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<u16, 1>, TexCoord_ReadDirect<u16, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<s16, 1>, TexCoord_ReadDirect<s16, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<float, 1>, TexCoord_ReadDirect<float, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<float, 1>, TexCoord_ReadDirect<float, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<float, 1>, TexCoord_ReadDirect<float, 2>),
+        ComponentCountRow(TexCoord_ReadDirect<float, 1>, TexCoord_ReadDirect<float, 2>),
+    }),
+    ComponentFormatTable({
+        ComponentCountRow(TexCoord_ReadIndex<u8, u8, 1>, TexCoord_ReadIndex<u8, u8, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, s8, 1>, TexCoord_ReadIndex<u8, s8, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, u16, 1>, TexCoord_ReadIndex<u8, u16, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, s16, 1>, TexCoord_ReadIndex<u8, s16, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, float, 1>, TexCoord_ReadIndex<u8, float, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, float, 1>, TexCoord_ReadIndex<u8, float, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, float, 1>, TexCoord_ReadIndex<u8, float, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u8, float, 1>, TexCoord_ReadIndex<u8, float, 2>),
+    }),
+    ComponentFormatTable({
+        ComponentCountRow(TexCoord_ReadIndex<u16, u8, 1>, TexCoord_ReadIndex<u16, u8, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, s8, 1>, TexCoord_ReadIndex<u16, s8, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, u16, 1>, TexCoord_ReadIndex<u16, u16, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, s16, 1>, TexCoord_ReadIndex<u16, s16, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, float, 1>, TexCoord_ReadIndex<u16, float, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, float, 1>, TexCoord_ReadIndex<u16, float, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, float, 1>, TexCoord_ReadIndex<u16, float, 2>),
+        ComponentCountRow(TexCoord_ReadIndex<u16, float, 1>, TexCoord_ReadIndex<u16, float, 2>),
+    }),
 };
+}  // Anonymous namespace
 
-static int tableReadTexCoordVertexSize[4][8][2] = {
-	{
-		{0, 0,}, {0, 0,}, {0, 0,}, {0, 0,}, {0, 0,},
-	},
-	{
-		{1, 2,}, {1, 2,}, {2, 4,}, {2, 4,}, {4, 8,},
-	},
-	{
-		{1, 1,}, {1, 1,}, {1, 1,}, {1, 1,}, {1, 1,},
-	},
-	{
-		{2, 2,}, {2, 2,}, {2, 2,}, {2, 2,}, {2, 2,},
-	},
-};
-
-unsigned int VertexLoader_TextCoord::GetSize(u64 _type, unsigned int _format, unsigned int _elements)
+TPipelineFunction VertexLoader_TextCoord::GetFunction(VertexComponentFormat type,
+                                                      ComponentFormat format,
+                                                      TexComponentCount elements)
 {
-	return tableReadTexCoordVertexSize[_type][_format][_elements];
-}
-
-TPipelineFunction VertexLoader_TextCoord::GetFunction(u64 _type, unsigned int _format, unsigned int _elements)
-{
-	return tableReadTexCoord[_type][_format][_elements];
+  return s_table_read_tex_coord[type][format][elements];
 }
 
 TPipelineFunction VertexLoader_TextCoord::GetDummyFunction()
 {
-	return TexCoord_Read_Dummy;
+  return TexCoord_Read_Dummy;
 }
