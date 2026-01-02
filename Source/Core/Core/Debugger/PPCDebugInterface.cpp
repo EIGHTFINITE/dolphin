@@ -1,218 +1,552 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <string>
-
-#include "Common/GekkoDisassembler.h"
-
-#include "Core/Core.h"
-#include "Core/Host.h"
-#include "Core/Debugger/Debugger_SymbolMap.h"
 #include "Core/Debugger/PPCDebugInterface.h"
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <regex>
+#include <string>
+#include <vector>
+
+#include <fmt/format.h>
+
+#include "Common/Align.h"
+#include "Common/Contains.h"
+#include "Common/GekkoDisassembler.h"
+#include "Common/StringUtil.h"
+
+#include "Core/AchievementManager.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Core.h"
+#include "Core/Debugger/OSThread.h"
+#include "Core/HW/CPU.h"
 #include "Core/HW/DSP.h"
-#include "Core/HW/Memmap.h"
-#include "Core/PowerPC/PowerPC.h"
+#include "Core/PatchEngine.h"
+#include "Core/PowerPC/MMU.h"
 #include "Core/PowerPC/PPCSymbolDB.h"
-#include "Core/PowerPC/JitCommon/JitBase.h"
+#include "Core/PowerPC/PowerPC.h"
+#include "Core/System.h"
 
-std::string PPCDebugInterface::Disassemble(unsigned int address)
+void ApplyMemoryPatch(const Core::CPUThreadGuard& guard, std::span<u8> value, const u32 address,
+                      bool store_existing_value)
 {
-	// PowerPC::HostRead_U32 seemed to crash on shutdown
-	if (!IsAlive())
-		return "";
+  if (value.empty())
+    return;
 
-	if (Core::GetState() == Core::CORE_PAUSE)
-	{
-		if (!PowerPC::HostIsRAMAddress(address))
-		{
-			return "(No RAM here)";
-		}
+  const std::size_t size = value.size();
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, address))
+    return;
 
-		u32 op = PowerPC::HostRead_Instruction(address);
-		std::string disasm = GekkoDisassembler::Disassemble(op, address);
+  auto& power_pc = guard.GetSystem().GetPowerPC();
 
-		UGeckoInstruction inst;
-		inst.hex = PowerPC::HostRead_U32(address);
+  bool should_invalidate_cache = false;
+  for (u32 offset = 0; offset < size; ++offset)
+  {
+    u8 old_value = PowerPC::MMU::HostRead<u8>(guard, address + offset);
+    if (old_value != value[offset])
+    {
+      PowerPC::MMU::HostWrite<u8>(guard, value[offset], address + offset);
+      should_invalidate_cache = true;
+      if (store_existing_value)
+        value[offset] = old_value;
+    }
 
-		if (inst.OPCD == 1)
-		{
-			disasm += " (hle)";
-		}
-
-		return disasm;
-	}
-	else
-	{
-		return "<unknown>";
-	}
+    if (((address + offset) % 4) == 3)
+    {
+      if (should_invalidate_cache)
+        power_pc.ScheduleInvalidateCacheThreadSafe(Common::AlignDown(address + offset, 4));
+      should_invalidate_cache = false;
+    }
+  }
+  if (should_invalidate_cache)
+  {
+    power_pc.ScheduleInvalidateCacheThreadSafe(
+        Common::AlignDown(address + static_cast<u32>(size) - 1, 4));
+  }
 }
 
-void PPCDebugInterface::GetRawMemoryString(int memory, unsigned int address, char *dest, int max_size)
+void PPCPatches::ApplyExistingPatch(const Core::CPUThreadGuard& guard, std::size_t index)
 {
-	if (IsAlive())
-	{
-		if (memory || PowerPC::HostIsRAMAddress(address))
-		{
-			snprintf(dest, max_size, "%08X%s", ReadExtraMemory(memory, address), memory ? " (ARAM)" : "");
-		}
-		else
-		{
-			strcpy(dest, memory ? "--ARAM--" : "--------");
-		}
-	}
-	else
-	{
-		strcpy(dest, "<unknwn>");  // bad spelling - 8 chars
-	}
+  auto& patch = m_patches[index];
+  ApplyMemoryPatch(guard, patch.value, patch.address, false);
 }
 
-unsigned int PPCDebugInterface::ReadMemory(unsigned int address)
+void PPCPatches::Patch(const Core::CPUThreadGuard& guard, std::size_t index)
 {
-	return PowerPC::HostRead_U32(address);
+  auto& patch = m_patches[index];
+  if (patch.type == Common::Debug::MemoryPatch::ApplyType::Once)
+    ApplyMemoryPatch(guard, patch.value, patch.address);
+  else
+    PatchEngine::AddMemoryPatch(index);
 }
 
-unsigned int PPCDebugInterface::ReadExtraMemory(int memory, unsigned int address)
+void PPCPatches::UnPatch(std::size_t index)
 {
-	switch (memory)
-	{
-	case 0:
-		return PowerPC::HostRead_U32(address);
-	case 1:
-		return (DSP::ReadARAM(address)     << 24) |
-		       (DSP::ReadARAM(address + 1) << 16) |
-		       (DSP::ReadARAM(address + 2) << 8) |
-		       (DSP::ReadARAM(address + 3));
-	default:
-		return 0;
-	}
+  auto& patch = m_patches[index];
+  if (patch.type == Common::Debug::MemoryPatch::ApplyType::Once)
+    return;
+
+  PatchEngine::RemoveMemoryPatch(index);
 }
 
-unsigned int PPCDebugInterface::ReadInstruction(unsigned int address)
+PPCDebugInterface::PPCDebugInterface(Core::System& system, PPCSymbolDB& ppc_symbol_db)
+    : m_system(system), m_ppc_symbol_db(ppc_symbol_db)
 {
-	return PowerPC::HostRead_Instruction(address);
 }
 
-bool PPCDebugInterface::IsAlive()
+PPCDebugInterface::~PPCDebugInterface() = default;
+
+std::size_t PPCDebugInterface::SetWatch(u32 address, std::string name)
 {
-	return Core::IsRunning();
+  return m_watches.SetWatch(address, std::move(name));
 }
 
-bool PPCDebugInterface::IsBreakpoint(unsigned int address)
+const Common::Debug::Watch& PPCDebugInterface::GetWatch(std::size_t index) const
 {
-	return PowerPC::breakpoints.IsAddressBreakPoint(address);
+  return m_watches.GetWatch(index);
 }
 
-void PPCDebugInterface::SetBreakpoint(unsigned int address)
+const std::vector<Common::Debug::Watch>& PPCDebugInterface::GetWatches() const
 {
-	PowerPC::breakpoints.Add(address);
+  return m_watches.GetWatches();
 }
 
-void PPCDebugInterface::ClearBreakpoint(unsigned int address)
+void PPCDebugInterface::UnsetWatch(u32 address)
 {
-	PowerPC::breakpoints.Remove(address);
+  m_watches.UnsetWatch(address);
+}
+
+void PPCDebugInterface::UpdateWatch(std::size_t index, u32 address, std::string name)
+{
+  return m_watches.UpdateWatch(index, address, std::move(name));
+}
+
+void PPCDebugInterface::UpdateWatchAddress(std::size_t index, u32 address)
+{
+  return m_watches.UpdateWatchAddress(index, address);
+}
+
+void PPCDebugInterface::UpdateWatchName(std::size_t index, std::string name)
+{
+  return m_watches.UpdateWatchName(index, std::move(name));
+}
+
+void PPCDebugInterface::UpdateWatchLockedState(std::size_t index, bool locked)
+{
+  return m_watches.UpdateWatchLockedState(index, locked);
+}
+
+void PPCDebugInterface::EnableWatch(std::size_t index)
+{
+  m_watches.EnableWatch(index);
+}
+
+void PPCDebugInterface::DisableWatch(std::size_t index)
+{
+  m_watches.DisableWatch(index);
+}
+
+bool PPCDebugInterface::HasEnabledWatch(u32 address) const
+{
+  return m_watches.HasEnabledWatch(address);
+}
+
+void PPCDebugInterface::RemoveWatch(std::size_t index)
+{
+  return m_watches.RemoveWatch(index);
+}
+
+void PPCDebugInterface::LoadWatchesFromStrings(const std::vector<std::string>& watches)
+{
+  m_watches.LoadFromStrings(watches);
+}
+
+std::vector<std::string> PPCDebugInterface::SaveWatchesToStrings() const
+{
+  return m_watches.SaveToStrings();
+}
+
+void PPCDebugInterface::ClearWatches()
+{
+  m_watches.Clear();
+}
+
+void PPCDebugInterface::SetPatch(const Core::CPUThreadGuard& guard, u32 address, u32 value)
+{
+  m_patches.SetPatch(guard, address, value);
+}
+
+void PPCDebugInterface::SetPatch(const Core::CPUThreadGuard& guard, u32 address,
+                                 std::vector<u8> value)
+{
+  m_patches.SetPatch(guard, address, std::move(value));
+}
+
+void PPCDebugInterface::SetFramePatch(const Core::CPUThreadGuard& guard, u32 address, u32 value)
+{
+  m_patches.SetFramePatch(guard, address, value);
+}
+
+void PPCDebugInterface::SetFramePatch(const Core::CPUThreadGuard& guard, u32 address,
+                                      std::vector<u8> value)
+{
+  m_patches.SetFramePatch(guard, address, std::move(value));
+}
+
+const std::vector<Common::Debug::MemoryPatch>& PPCDebugInterface::GetPatches() const
+{
+  return m_patches.GetPatches();
+}
+
+void PPCDebugInterface::UnsetPatch(const Core::CPUThreadGuard& guard, u32 address)
+{
+  m_patches.UnsetPatch(guard, address);
+}
+
+void PPCDebugInterface::EnablePatch(const Core::CPUThreadGuard& guard, std::size_t index)
+{
+  m_patches.EnablePatch(guard, index);
+}
+
+void PPCDebugInterface::DisablePatch(const Core::CPUThreadGuard& guard, std::size_t index)
+{
+  m_patches.DisablePatch(guard, index);
+}
+
+bool PPCDebugInterface::HasEnabledPatch(u32 address) const
+{
+  return m_patches.HasEnabledPatch(address);
+}
+
+void PPCDebugInterface::RemovePatch(const Core::CPUThreadGuard& guard, std::size_t index)
+{
+  m_patches.RemovePatch(guard, index);
+}
+
+void PPCDebugInterface::ClearPatches(const Core::CPUThreadGuard& guard)
+{
+  m_patches.ClearPatches(guard);
+}
+
+void PPCDebugInterface::ApplyExistingPatch(const Core::CPUThreadGuard& guard, std::size_t index)
+{
+  m_patches.ApplyExistingPatch(guard, index);
+}
+
+Common::Debug::Threads PPCDebugInterface::GetThreads(const Core::CPUThreadGuard& guard) const
+{
+  Common::Debug::Threads threads;
+
+  constexpr u32 ACTIVE_QUEUE_HEAD_ADDR = 0x800000dc;
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, ACTIVE_QUEUE_HEAD_ADDR))
+    return threads;
+  const u32 active_queue_head = PowerPC::MMU::HostRead<u32>(guard, ACTIVE_QUEUE_HEAD_ADDR);
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, active_queue_head))
+    return threads;
+
+  auto active_thread = std::make_unique<Core::Debug::OSThreadView>(guard, active_queue_head);
+  if (!active_thread->IsValid(guard))
+    return threads;
+
+  std::vector<u32> visited_addrs{active_thread->GetAddress()};
+  const auto insert_threads = [&guard, &threads, &visited_addrs](u32 addr, auto get_next_addr) {
+    while (addr != 0 && PowerPC::MMU::HostIsRAMAddress(guard, addr))
+    {
+      if (Common::Contains(visited_addrs, addr))
+        break;
+      visited_addrs.push_back(addr);
+      auto thread = std::make_unique<Core::Debug::OSThreadView>(guard, addr);
+      if (!thread->IsValid(guard))
+        break;
+      addr = get_next_addr(*thread);
+      threads.emplace_back(std::move(thread));
+    }
+  };
+
+  const u32 prev_addr = active_thread->Data().thread_link.prev;
+  insert_threads(prev_addr, [](const auto& thread) { return thread.Data().thread_link.prev; });
+  std::ranges::reverse(threads);
+
+  const u32 next_addr = active_thread->Data().thread_link.next;
+  threads.emplace_back(std::move(active_thread));
+  insert_threads(next_addr, [](const auto& thread) { return thread.Data().thread_link.next; });
+
+  return threads;
+}
+
+std::string PPCDebugInterface::Disassemble(const Core::CPUThreadGuard* guard, u32 address) const
+{
+  if (guard)
+  {
+    if (!PowerPC::MMU::HostIsRAMAddress(*guard, address))
+    {
+      return "(No RAM here)";
+    }
+
+    const u32 op = PowerPC::MMU::HostRead_Instruction(*guard, address);
+    std::string disasm = Common::GekkoDisassembler::Disassemble(op, address);
+    const UGeckoInstruction inst{op};
+
+    if (inst.OPCD == 1)
+    {
+      disasm += " (hle)";
+    }
+
+    return disasm;
+  }
+  else
+  {
+    return "<unknown>";
+  }
+}
+
+std::string PPCDebugInterface::GetRawMemoryString(const Core::CPUThreadGuard& guard, int memory,
+                                                  u32 address) const
+{
+  if (IsAlive())
+  {
+    const bool is_aram = memory != 0;
+
+    if (is_aram || PowerPC::MMU::HostIsRAMAddress(guard, address))
+    {
+      return fmt::format("{:08X}{}", ReadExtraMemory(guard, memory, address),
+                         is_aram ? " (ARAM)" : "");
+    }
+
+    return is_aram ? "--ARAM--" : "--------";
+  }
+
+  return "<unknwn>";  // bad spelling - 8 chars
+}
+
+u32 PPCDebugInterface::ReadMemory(const Core::CPUThreadGuard& guard, u32 address) const
+{
+  return PowerPC::MMU::HostRead<u32>(guard, address);
+}
+
+u32 PPCDebugInterface::ReadExtraMemory(const Core::CPUThreadGuard& guard, int memory,
+                                       u32 address) const
+{
+  switch (memory)
+  {
+  case 0:
+    return PowerPC::MMU::HostRead<u32>(guard, address);
+  case 1:
+  {
+    const auto& dsp = guard.GetSystem().GetDSP();
+    return (dsp.ReadARAM(address) << 24) | (dsp.ReadARAM(address + 1) << 16) |
+           (dsp.ReadARAM(address + 2) << 8) | (dsp.ReadARAM(address + 3));
+  }
+  default:
+    return 0;
+  }
+}
+
+u32 PPCDebugInterface::ReadInstruction(const Core::CPUThreadGuard& guard, u32 address) const
+{
+  return PowerPC::MMU::HostRead_Instruction(guard, address);
+}
+
+bool PPCDebugInterface::IsAlive() const
+{
+  return Core::IsRunning(m_system);
+}
+
+bool PPCDebugInterface::IsBreakpoint(u32 address) const
+{
+  return m_system.GetPowerPC().GetBreakPoints().IsAddressBreakPoint(address);
+}
+
+void PPCDebugInterface::AddBreakpoint(u32 address)
+{
+  m_system.GetPowerPC().GetBreakPoints().Add(address);
+}
+
+void PPCDebugInterface::RemoveBreakpoint(u32 address)
+{
+  m_system.GetPowerPC().GetBreakPoints().Remove(address);
 }
 
 void PPCDebugInterface::ClearAllBreakpoints()
 {
-	PowerPC::breakpoints.Clear();
+  m_system.GetPowerPC().GetBreakPoints().Clear();
 }
 
-void PPCDebugInterface::ToggleBreakpoint(unsigned int address)
+void PPCDebugInterface::ToggleBreakpoint(u32 address)
 {
-	if (PowerPC::breakpoints.IsAddressBreakPoint(address))
-		PowerPC::breakpoints.Remove(address);
-	else
-		PowerPC::breakpoints.Add(address);
-}
-
-void PPCDebugInterface::AddWatch(unsigned int address)
-{
-	PowerPC::watches.Add(address);
+  m_system.GetPowerPC().GetBreakPoints().ToggleBreakPoint(address);
 }
 
 void PPCDebugInterface::ClearAllMemChecks()
 {
-	PowerPC::memchecks.Clear();
+  m_system.GetPowerPC().GetMemChecks().Clear();
 }
 
-bool PPCDebugInterface::IsMemCheck(unsigned int address)
+bool PPCDebugInterface::IsMemCheck(u32 address, size_t size) const
 {
-	return (Memory::AreMemoryBreakpointsActivated() &&
-	        PowerPC::memchecks.GetMemCheck(address));
+  return m_system.GetPowerPC().GetMemChecks().GetMemCheck(address, size) != nullptr;
 }
 
-void PPCDebugInterface::ToggleMemCheck(unsigned int address)
+void PPCDebugInterface::ToggleMemCheck(u32 address, bool read, bool write, bool log)
 {
-	if (Memory::AreMemoryBreakpointsActivated() &&
-	    !PowerPC::memchecks.GetMemCheck(address))
-	{
-		// Add Memory Check
-		TMemCheck MemCheck;
-		MemCheck.StartAddress = address;
-		MemCheck.EndAddress = address;
-		MemCheck.OnRead = true;
-		MemCheck.OnWrite = true;
+  if (!IsMemCheck(address))
+  {
+    // Add Memory Check
+    TMemCheck MemCheck;
+    MemCheck.start_address = address;
+    MemCheck.end_address = address;
+    MemCheck.is_break_on_read = read;
+    MemCheck.is_break_on_write = write;
 
-		MemCheck.Log = true;
-		MemCheck.Break = true;
+    MemCheck.log_on_hit = log;
+    MemCheck.break_on_hit = true;
 
-		PowerPC::memchecks.Add(MemCheck);
-	}
-	else
-		PowerPC::memchecks.Remove(address);
+    m_system.GetPowerPC().GetMemChecks().Add(std::move(MemCheck));
+  }
+  else
+  {
+    m_system.GetPowerPC().GetMemChecks().Remove(address);
+  }
 }
-
-void PPCDebugInterface::InsertBLR(unsigned int address, unsigned int value)
-{
-	PowerPC::HostWrite_U32(value, address);
-}
-
 
 // =======================================================
 // Separate the blocks with colors.
 // -------------
-int PPCDebugInterface::GetColor(unsigned int address)
+u32 PPCDebugInterface::GetColor(const Core::CPUThreadGuard* guard, u32 address) const
 {
-	if (!IsAlive())
-		return 0xFFFFFF;
-	if (!PowerPC::HostIsRAMAddress(address))
-		return 0xeeeeee;
-	static const int colors[6] =
-	{
-		0xd0FFFF,  // light cyan
-		0xFFd0d0,  // light red
-		0xd8d8FF,  // light blue
-		0xFFd0FF,  // light purple
-		0xd0FFd0,  // light green
-		0xFFFFd0,  // light yellow
-	};
-	Symbol *symbol = g_symbolDB.GetSymbolFromAddr(address);
-	if (!symbol)
-		return 0xFFFFFF;
-	if (symbol->type != Symbol::SYMBOL_FUNCTION)
-		return 0xEEEEFF;
-	return colors[symbol->index % 6];
+  if (!guard || !IsAlive())
+    return 0xFFFFFF;
+  if (!PowerPC::MMU::HostIsRAMAddress(*guard, address))
+    return 0xeeeeee;
+
+  const Common::Symbol* const symbol = m_ppc_symbol_db.GetSymbolFromAddr(address);
+  if (!symbol)
+    return 0xFFFFFF;
+  if (symbol->type != Common::Symbol::Type::Function)
+    return 0xEEEEFF;
+
+  static constexpr std::array<u32, 6> colors{
+      0xd0FFFF,  // light cyan
+      0xFFd0d0,  // light red
+      0xd8d8FF,  // light blue
+      0xFFd0FF,  // light purple
+      0xd0FFd0,  // light green
+      0xFFFFd0,  // light yellow
+  };
+  return colors[symbol->index % colors.size()];
 }
 // =============
 
-
-std::string PPCDebugInterface::GetDescription(unsigned int address)
+std::string PPCDebugInterface::GetDescription(u32 address) const
 {
-	return g_symbolDB.GetDescription(address);
+  return m_ppc_symbol_db.GetDescription(address);
 }
 
-unsigned int PPCDebugInterface::GetPC()
+std::optional<u32>
+PPCDebugInterface::GetMemoryAddressFromInstruction(const std::string& instruction) const
 {
-	return PowerPC::ppcState.pc;
+  static const std::regex re(",[^r0-]*(-?)(?:0[xX])?([0-9a-fA-F]+|r\\d+)[^r^s]*.(p|toc|\\d+)");
+  std::smatch match;
+
+  // Instructions should be identified as a load or store before using this function. This error
+  // check should never trigger.
+  if (!std::regex_search(instruction, match, re))
+    return std::nullopt;
+
+  // match[1]: negative sign for offset or no match.
+  // match[2]: 0xNNNN, 0, or rNN. Check next for 'r' to see if a gpr needs to be loaded.
+  // match[3]: will either be p, toc, or NN. Always a gpr.
+  const std::string_view offset_match{&*match[2].first, size_t(match[2].length())};
+  const std::string_view register_match{&*match[3].first, size_t(match[3].length())};
+  constexpr char is_reg = 'r';
+  u32 offset = 0;
+
+  if (is_reg == offset_match[0])
+  {
+    unsigned register_index = 0;
+    Common::FromChars(offset_match.substr(1), register_index, 10);
+    offset = (register_index == 0 ? 0 : m_system.GetPPCState().gpr[register_index]);
+  }
+  else
+  {
+    Common::FromChars(offset_match, offset, 16);
+  }
+
+  // sp and rtoc need to be converted to 1 and 2.
+  constexpr char is_sp = 'p';
+  constexpr char is_rtoc = 't';
+  u32 i = 0;
+
+  if (is_sp == register_match[0])
+    i = 1;
+  else if (is_rtoc == register_match[0])
+    i = 2;
+  else
+    Common::FromChars(register_match, i, 10);
+
+  const u32 base_address = m_system.GetPPCState().gpr[i];
+
+  if (std::string_view sign{&*match[1].first, size_t(match[1].length())}; !sign.empty())
+    return base_address - offset;
+
+  return base_address + offset;
 }
 
-void PPCDebugInterface::SetPC(unsigned int address)
+u32 PPCDebugInterface::GetPC() const
 {
-	PowerPC::ppcState.pc = address;
+  return m_system.GetPPCState().pc;
 }
 
-void PPCDebugInterface::RunToBreakpoint()
+void PPCDebugInterface::SetPC(u32 address)
 {
+  m_system.GetPPCState().pc = address;
+}
 
+void PPCDebugInterface::RunTo(u32 address)
+{
+  auto& breakpoints = m_system.GetPowerPC().GetBreakPoints();
+  breakpoints.SetTemporary(address);
+  m_system.GetCPU().SetStepping(false);
+}
+
+std::shared_ptr<Core::NetworkCaptureLogger> PPCDebugInterface::NetworkLogger()
+{
+  const bool has_ssl = Config::Get(Config::MAIN_NETWORK_SSL_DUMP_READ) ||
+                       Config::Get(Config::MAIN_NETWORK_SSL_DUMP_WRITE);
+  const bool is_pcap = Config::Get(Config::MAIN_NETWORK_DUMP_AS_PCAP);
+  const auto current_capture_type = [&] {
+    if (is_pcap)
+      return Core::NetworkCaptureType::PCAP;
+    if (has_ssl)
+      return Core::NetworkCaptureType::Raw;
+    return Core::NetworkCaptureType::None;
+  }();
+
+  if (m_network_logger && m_network_logger->GetCaptureType() == current_capture_type)
+    return m_network_logger;
+
+  switch (current_capture_type)
+  {
+  case Core::NetworkCaptureType::PCAP:
+    m_network_logger = std::make_shared<Core::PCAPSSLCaptureLogger>();
+    break;
+  case Core::NetworkCaptureType::Raw:
+    m_network_logger = std::make_shared<Core::BinarySSLCaptureLogger>();
+    break;
+  case Core::NetworkCaptureType::None:
+    m_network_logger = std::make_shared<Core::DummyNetworkCaptureLogger>();
+    break;
+  }
+  return m_network_logger;
+}
+
+void PPCDebugInterface::Clear(const Core::CPUThreadGuard& guard)
+{
+  ClearAllBreakpoints();
+  ClearAllMemChecks();
+  ClearPatches(guard);
+  ClearWatches();
+  m_network_logger.reset();
 }
