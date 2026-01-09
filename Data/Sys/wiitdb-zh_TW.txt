@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: ZHTW_unique version: 20250826093652)
 410E01 = Wii 備份光碟 v1.31(美)
 D2AJAF = 運動生活 探險家 試玩版(日)
 D2SE18 = 運動大集錦2 試玩版(美)
