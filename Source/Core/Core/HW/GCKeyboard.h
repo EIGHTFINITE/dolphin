@@ -1,23 +1,28 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 
 class InputConfig;
+enum class KeyboardGroup;
 struct KeyboardStatus;
+
+namespace ControllerEmu
+{
+class ControlGroup;
+}
 
 namespace Keyboard
 {
-
 void Shutdown();
-void Initialize(void* const hwnd);
+void Initialize();
 void LoadConfig();
+void GenerateDynamicInputTextures();
 
 InputConfig* GetConfig();
+ControllerEmu::ControlGroup* GetGroup(int port, KeyboardGroup group);
 
-void GetStatus(u8 port, KeyboardStatus* keyboard_status);
-
-}
+KeyboardStatus GetStatus(int port);
+}  // namespace Keyboard
