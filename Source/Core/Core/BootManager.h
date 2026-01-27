@@ -1,14 +1,23 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include <string>
+#include <memory>
+
+namespace Core
+{
+class System;
+}
+struct BootParameters;
+struct WindowSystemInfo;
 
 namespace BootManager
 {
-bool BootCore(const std::string& _rFilename);
+bool BootCore(Core::System& system, std::unique_ptr<BootParameters> parameters,
+              const WindowSystemInfo& wsi);
 
-void Stop();
-}
+// Synchronise Dolphin's configuration with the SYSCONF (which may have changed during emulation),
+// and restore settings that were overridden by per-game INIs or for some other reason.
+void RestoreConfig();
+}  // namespace BootManager

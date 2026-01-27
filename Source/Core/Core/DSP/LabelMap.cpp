@@ -1,75 +1,99 @@
 // Copyright 2009 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "Core/DSP/DSPTables.h"
 #include "Core/DSP/LabelMap.h"
 
-LabelMap::LabelMap()
-{
+#include <algorithm>
+#include <string>
+#include <vector>
 
-}
+#include <fmt/base.h>
+
+#include "Core/DSP/DSPTables.h"
+
+namespace DSP
+{
+struct LabelMap::Label
+{
+  Label(std::string lbl, s32 address, LabelType ltype)
+      : name(std::move(lbl)), addr(address), type(ltype)
+  {
+  }
+  std::string name;
+  s32 addr;
+  LabelType type;
+};
+
+LabelMap::LabelMap() = default;
+
+LabelMap::~LabelMap() = default;
 
 void LabelMap::RegisterDefaults()
 {
-	for (int i = 0; i < 0x24; i++)
-	{
-		if (regnames[i].name)
-			RegisterLabel(regnames[i].name, regnames[i].addr);
-	}
-	for (int i = 0; i < (int)pdlabels_size; i++)
-	{
-		if (pdlabels[i].name)
-			RegisterLabel(pdlabels[i].name, pdlabels[i].addr);
-	}
+  for (const auto& reg_name_label : regnames)
+  {
+    if (reg_name_label.name != nullptr)
+      RegisterLabel(reg_name_label.name, reg_name_label.addr);
+  }
+
+  for (const auto& predefined_label : pdlabels)
+  {
+    if (predefined_label.name != nullptr)
+      RegisterLabel(predefined_label.name, predefined_label.addr);
+  }
 }
 
-void LabelMap::RegisterLabel(const std::string &label, u16 lval, LabelType type)
+bool LabelMap::RegisterLabel(std::string label, u16 lval, LabelType type)
 {
-	u16 old_value;
-	if (GetLabelValue(label, &old_value) && old_value != lval)
-	{
-		printf("WARNING: Redefined label %s to %04x - old value %04x\n",
-			   label.c_str(), lval, old_value);
-		DeleteLabel(label);
-	}
-	labels.emplace_back(label, lval, type);
+  const std::optional<u16> old_value = GetLabelValue(label);
+  if (old_value)
+  {
+    if (old_value != lval)
+    {
+      fmt::print("Attempted to redefine label {} from {:04x} to {:04x}\n", label, lval, *old_value);
+      return false;
+    }
+    else
+    {
+      return true;
+    }
+  }
+  labels.emplace_back(std::move(label), lval, type);
+  return true;
 }
 
-void LabelMap::DeleteLabel(const std::string &label)
+void LabelMap::DeleteLabel(std::string_view label)
 {
-	for (std::vector<label_t>::iterator iter = labels.begin();
-		iter != labels.end(); ++iter)
-	{
-		if (!label.compare(iter->name))
-		{
-			labels.erase(iter);
-			return;
-		}
-	}
+  const auto iter = std::ranges::find(labels, label, &Label::name);
+
+  if (iter == labels.cend())
+    return;
+
+  labels.erase(iter);
 }
 
-bool LabelMap::GetLabelValue(const std::string &name, u16 *value, LabelType type) const
+std::optional<u16> LabelMap::GetLabelValue(std::string_view name, LabelType type) const
 {
-	for (auto& label : labels)
-	{
-		if (!name.compare(label.name))
-		{
-			if (type & label.type)
-			{
-				*value = label.addr;
-				return true;
-			}
-			else
-			{
-				printf("WARNING: Wrong label type requested. %s\n", name.c_str());
-			}
-		}
-	}
-	return false;
+  for (const auto& label : labels)
+  {
+    if (name == label.name)
+    {
+      if ((type & label.type) != 0)
+      {
+        return label.addr;
+      }
+      else
+      {
+        fmt::print("Wrong label type requested. {}\n", name);
+      }
+    }
+  }
+
+  return std::nullopt;
 }
 
 void LabelMap::Clear()
 {
-	labels.clear();
+  labels.clear();
 }
+}  // namespace DSP
