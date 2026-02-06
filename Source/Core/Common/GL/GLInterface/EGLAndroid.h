@@ -1,16 +1,13 @@
 // Copyright 2014 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include <android/native_window.h>
 #include "Common/GL/GLInterface/EGL.h"
 
-class cInterfaceEGLAndroid : public cInterfaceEGL
+class GLContextEGLAndroid final : public GLContextEGL
 {
 protected:
-	EGLDisplay OpenDisplay() override;
-	EGLNativeWindowType InitializePlatform(EGLNativeWindowType host_window, EGLConfig config) override;
-	void ShutdownPlatform() override;
+  EGLDisplay OpenEGLDisplay() override;
+  EGLNativeWindowType GetEGLNativeWindow(EGLConfig config) override;
 };
