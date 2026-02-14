@@ -373,6 +373,42 @@ TEST(StringUtil, StringToIPv4PortRange)
   EXPECT_TRUE(parse("192.168.0.13-14:80-81")->IsMatch(parse("192.168.0.14:81")->first));
 }
 
+TEST(StringUtil, IPv4PortRangeToString)
+{
+  Common::IPv4PortRange subject{
+      .first = {{10, 3, 0, 127}, 0},
+      .last = {{10, 3, 0, 127}, 0},
+  };
+
+  EXPECT_EQ(subject.ToString(), "10.3.0.127");
+
+  subject.last.port = Common::swap16(80);  // First port is still zero.
+  EXPECT_EQ(subject.ToString(), "10.3.0.127");
+
+  subject.first.port = Common::swap16(80);
+  EXPECT_EQ(subject.ToString(), "10.3.0.127:80");
+
+  subject.last.port = Common::swap16(88);
+  EXPECT_EQ(subject.ToString(), "10.3.0.127:80-88");
+
+  subject.last.ip_address = {10, 3, 0, 128};
+  EXPECT_EQ(subject.ToString(), "10.3.0.127-128:80-88");
+
+  subject.last.ip_address = {10, 3, 7, 35};
+  EXPECT_EQ(subject.ToString(), "10.3.0.127-10.3.7.35:80-88");
+
+  subject.first.ip_address = {192, 168, 0, 0};
+  subject.last.ip_address = {192, 168, 0, 255};
+  EXPECT_EQ(subject.ToString(), "192.168.0.0/24:80-88");
+
+  subject.last.ip_address = {192, 168, 3, 255};
+  EXPECT_EQ(subject.ToString(), "192.168.0.0/22:80-88");
+
+  subject.first.ip_address = {};
+  subject.last.ip_address = {255, 255, 255, 255};
+  EXPECT_EQ(subject.ToString(), "0.0.0.0/0:80-88");
+}
+
 TEST(StringUtil, CharacterEncodingConversion)
 {
   // wstring

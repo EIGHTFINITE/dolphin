@@ -57,17 +57,39 @@ bool IPv4PortRange::IsMatch(IPv4Port subject) const
 
 std::string IPv4PortRange::ToString() const
 {
-  const std::string ip_range = first.ip_address == last.ip_address ?
-                                   Common::IPAddressToString(first.ip_address) :
-                                   fmt::format("{}-{}", Common::IPAddressToString(first.ip_address),
-                                               Common::IPAddressToString(last.ip_address));
+  const u32 first_ip_value = first.GetIPAddressValue();
+  const u32 last_ip_value = last.GetIPAddressValue();
+  const u32 different_bits = first_ip_value ^ last_ip_value;
+  const u32 common_high_bits = std::countl_zero(different_bits);
+
+  std::string ip_range = Common::IPAddressToString(first.ip_address);
+  if (common_high_bits == 32)
+  {
+    // Identical first and last IP.
+  }
+  else if ((last_ip_value - first_ip_value + 1) << common_high_bits == 0)
+  {
+    // An exact network range can use CIDR notation.
+    ip_range = fmt::format("{}/{}", ip_range, common_high_bits);
+  }
+  else if (common_high_bits >= 24)
+  {
+    // Only the last octet is different.
+    ip_range = fmt::format("{}-{}", ip_range, last.ip_address.back());
+  }
+  else
+  {
+    // Plainly specified range.
+    ip_range = fmt::format("{}-{}", ip_range, Common::IPAddressToString(last.ip_address));
+  }
 
   if (first.port == 0)
     return ip_range;
-  else if (first.port == last.port)
+
+  if (first.port == last.port)
     return fmt::format("{}:{}", ip_range, first.GetPortValue());
-  else
-    return fmt::format("{}:{}-{}", ip_range, first.GetPortValue(), last.GetPortValue());
+
+  return fmt::format("{}:{}-{}", ip_range, first.GetPortValue(), last.GetPortValue());
 }
 
 std::string IPAddressToString(IPAddress ip_address)
