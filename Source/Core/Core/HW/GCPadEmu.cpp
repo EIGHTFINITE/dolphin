@@ -194,6 +194,9 @@ void GCPad::LoadDefaults(const ControllerInterface& ciface)
 #ifdef ANDROID
   // Rumble
   m_rumble->SetControlExpression(0, "`Android/0/Device Sensors:Motor 0`");
+
+  // Triforce Coin
+  m_triforce->SetControlExpression(2, "pulse(`Android/0/Device Sensors:Accel Down` > 15, 0.1)");
 #else
   // Buttons: A, B, X, Y, Z
   m_buttons->SetControlExpression(0, "`X`");
