@@ -1,58 +1,40 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
-#include "Common/CommonTypes.h"
+#include "VideoCommon/TextureInfo.h"
+
+namespace VideoCommon
+{
+class TextureDataResource;
+}
+
+enum class TextureFormat;
+
+std::set<std::string> GetTextureDirectoriesWithGameId(const std::string& root_directory,
+                                                      const std::string& game_id);
 
 class HiresTexture
 {
 public:
-	using SOILPointer = std::unique_ptr<u8, void(*)(unsigned char*)>;
+  static void Update();
+  static void Clear();
+  static void Shutdown();
+  static std::shared_ptr<HiresTexture> Search(const TextureInfo& texture_info);
 
-	static void Init();
-	static void Update();
-	static void Shutdown();
+  HiresTexture(bool has_arbitrary_mipmaps, std::string id);
 
-	static std::shared_ptr<HiresTexture> Search(
-		const u8* texture, size_t texture_size,
-		const u8* tlut, size_t tlut_size,
-		u32 width, u32 height,
-		int format, bool has_mipmaps
-	);
-
-	static std::string GenBaseName(
-		const u8* texture, size_t texture_size,
-		const u8* tlut, size_t tlut_size,
-		u32 width, u32 height,
-		int format, bool has_mipmaps,
-		bool dump = false
-	);
-
-	~HiresTexture();
-
-	struct Level
-	{
-		Level();
-
-		SOILPointer data;
-		size_t data_size = 0;
-		u32 width = 0;
-		u32 height = 0;
-	};
-	std::vector<Level> m_levels;
+  bool HasArbitraryMipmaps() const { return m_has_arbitrary_mipmaps; }
+  VideoCommon::TextureDataResource* LoadTexture() const;
+  const std::string& GetId() const { return m_id; }
 
 private:
-	static std::unique_ptr<HiresTexture> Load(const std::string& base_filename, u32 width, u32 height);
-	static void Prefetch();
-
-	static std::string GetTextureDirectory(const std::string& game_id);
-
-	HiresTexture() {}
-
+  bool m_has_arbitrary_mipmaps = false;
+  std::string m_id;
 };

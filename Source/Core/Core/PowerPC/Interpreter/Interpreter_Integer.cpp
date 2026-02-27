@@ -1,681 +1,691 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "Common/CommonFuncs.h"
-#include "Common/CommonTypes.h"
-#include "Common/MsgHandler.h"
-#include "Common/Logging/Log.h"
-#include "Core/PowerPC/PowerPC.h"
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 
-void Interpreter::Helper_UpdateCR0(u32 value)
+#include <bit>
+
+#include "Common/CommonTypes.h"
+#include "Common/Logging/Log.h"
+#include "Core/PowerPC/Interpreter/ExceptionUtils.h"
+#include "Core/PowerPC/PowerPC.h"
+#include "Core/System.h"
+
+void Interpreter::Helper_UpdateCR0(PowerPC::PowerPCState& ppc_state, u32 value)
 {
-	Helper_UpdateCRx(0, value);
+  const s64 sign_extended = s64{s32(value)};
+  u64 cr_val = u64(sign_extended);
+
+  if (value == 0)
+  {
+    // GT is considered unset if cr_val is zero or if bit 63 of cr_val is set.
+    // If we're about to turn cr_val from zero to non-zero by setting the SO bit,
+    // we need to set bit 63 so we don't accidentally change GT.
+    cr_val |= 1ULL << 63;
+  }
+
+  cr_val = (cr_val & ~(1ULL << PowerPC::CR_EMU_SO_BIT)) |
+           (u64{ppc_state.GetXER_SO()} << PowerPC::CR_EMU_SO_BIT);
+
+  ppc_state.cr.fields[0] = cr_val;
 }
 
-void Interpreter::Helper_UpdateCRx(int idx, u32 value)
+u32 Interpreter::Helper_Carry(u32 value1, u32 value2)
 {
-	s64 sign_extended = (s64)(s32)value;
-	u64 cr_val = (u64)sign_extended;
-	cr_val = (cr_val & ~(1ull << 61)) | ((u64)GetXER_SO() << 61);
-
-	PowerPC::ppcState.cr_val[idx] = cr_val;
+  return value2 > (~value1);
 }
 
-u32 Interpreter::Helper_Carry(u32 _uValue1, u32 _uValue2)
+void Interpreter::addi(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	return _uValue2 > (~_uValue1);
+  auto& ppc_state = interpreter.m_ppc_state;
+  if (inst.RA)
+    ppc_state.gpr[inst.RD] = ppc_state.gpr[inst.RA] + u32(inst.SIMM_16);
+  else
+    ppc_state.gpr[inst.RD] = u32(inst.SIMM_16);
 }
 
-u32 Interpreter::Helper_Mask(int mb, int me)
+void Interpreter::addic(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	//first make 001111111111111 part
-	u32 begin = 0xFFFFFFFF >> mb;
-	//then make 000000000001111 part, which is used to flip the bits of the first one
-	u32 end = 0x7FFFFFFF >> me;
-	//do the bitflip
-	u32 mask = begin ^ end;
-	//and invert if backwards
-	if (me < mb)
-		return ~mask;
-	else
-		return mask;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 imm = u32(s32{inst.SIMM_16});
+
+  ppc_state.gpr[inst.RD] = a + imm;
+  ppc_state.SetCarry(Helper_Carry(a, imm));
 }
 
-void Interpreter::addi(UGeckoInstruction _inst)
+void Interpreter::addic_rc(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	if (_inst.RA)
-		rGPR[_inst.RD] = rGPR[_inst.RA] + _inst.SIMM_16;
-	else
-		rGPR[_inst.RD] = _inst.SIMM_16;
+  addic(interpreter, inst);
+  auto& ppc_state = interpreter.m_ppc_state;
+  Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RD]);
 }
 
-void Interpreter::addic(UGeckoInstruction _inst)
+void Interpreter::addis(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 imm = (u32)(s32)_inst.SIMM_16;
-	// TODO(ector): verify this thing
-	rGPR[_inst.RD] = a + imm;
-	SetCarry(Helper_Carry(a, imm));
+  auto& ppc_state = interpreter.m_ppc_state;
+  if (inst.RA)
+    ppc_state.gpr[inst.RD] = ppc_state.gpr[inst.RA] + u32(inst.SIMM_16 << 16);
+  else
+    ppc_state.gpr[inst.RD] = u32(inst.SIMM_16 << 16);
 }
 
-void Interpreter::addic_rc(UGeckoInstruction _inst)
+void Interpreter::andi_rc(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	addic(_inst);
-	Helper_UpdateCR0(rGPR[_inst.RD]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] & inst.UIMM;
+  Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::addis(UGeckoInstruction _inst)
+void Interpreter::andis_rc(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	if (_inst.RA)
-		rGPR[_inst.RD] = rGPR[_inst.RA] + (_inst.SIMM_16 << 16);
-	else
-		rGPR[_inst.RD] = (_inst.SIMM_16 << 16);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] & (u32{inst.UIMM} << 16);
+  Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::andi_rc(UGeckoInstruction _inst)
+template <typename T>
+void Interpreter::Helper_IntCompare(PowerPC::PowerPCState& ppc_state, UGeckoInstruction inst, T a,
+                                    T b)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] & _inst.UIMM;
-	Helper_UpdateCR0(rGPR[_inst.RA]);
+  u32 cr_field;
+
+  if (a < b)
+    cr_field = PowerPC::CR_LT;
+  else if (a > b)
+    cr_field = PowerPC::CR_GT;
+  else
+    cr_field = PowerPC::CR_EQ;
+
+  if (ppc_state.GetXER_SO())
+    cr_field |= PowerPC::CR_SO;
+
+  ppc_state.cr.SetField(inst.CRFD, cr_field);
 }
 
-void Interpreter::andis_rc(UGeckoInstruction _inst)
+void Interpreter::cmpi(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] & ((u32)_inst.UIMM << 16);
-	Helper_UpdateCR0(rGPR[_inst.RA]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s32 a = static_cast<s32>(ppc_state.gpr[inst.RA]);
+  const s32 b = inst.SIMM_16;
+  Helper_IntCompare(ppc_state, inst, a, b);
 }
 
-void Interpreter::cmpi(UGeckoInstruction _inst)
+void Interpreter::cmpli(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	Helper_UpdateCRx(_inst.CRFD, rGPR[_inst.RA] - _inst.SIMM_16);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = inst.UIMM;
+  Helper_IntCompare(ppc_state, inst, a, b);
 }
 
-void Interpreter::cmpli(UGeckoInstruction _inst)
+void Interpreter::mulli(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = _inst.UIMM;
-	int f;
-
-	if (a < b)
-		f = 0x8;
-	else if (a > b)
-		f = 0x4;
-	else
-		f = 0x2; //equals
-
-	if (GetXER_SO())
-		f |= 0x1;
-
-	SetCRField(_inst.CRFD, f);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RD] = u32(s32(ppc_state.gpr[inst.RA]) * inst.SIMM_16);
 }
 
-void Interpreter::mulli(UGeckoInstruction _inst)
+void Interpreter::ori(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RD] = (s32)rGPR[_inst.RA] * _inst.SIMM_16;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] | inst.UIMM;
 }
 
-void Interpreter::ori(UGeckoInstruction _inst)
+void Interpreter::oris(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] | _inst.UIMM;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] | (u32{inst.UIMM} << 16);
 }
 
-void Interpreter::oris(UGeckoInstruction _inst)
+void Interpreter::subfic(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] | (_inst.UIMM << 16);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s32 a = s32(ppc_state.gpr[inst.RA]);
+  const s32 immediate = inst.SIMM_16;
+  ppc_state.gpr[inst.RD] = u32(immediate - a);
+  ppc_state.SetCarry((a == 0) || (Helper_Carry(0 - u32(a), u32(immediate))));
 }
 
-void Interpreter::subfic(UGeckoInstruction _inst)
+void Interpreter::twi(Interpreter& interpreter, UGeckoInstruction inst)
 {
-/*	u32 rra = ~rGPR[_inst.RA];
-	s32 immediate = (s16)_inst.SIMM_16 + 1;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s32 a = s32(ppc_state.gpr[inst.RA]);
+  const s32 b = inst.SIMM_16;
+  const u32 TO = inst.TO;
 
-//	#define CALC_XER_CA(X,Y) (((X) + (Y) < X) ? SET_XER_CA : CLEAR_XER_CA)
-	if ((rra + immediate) < rra)
-		SetCarry(1);
-	else
-		SetCarry(0);
+  DEBUG_LOG_FMT(POWERPC, "twi rA {:x} SIMM {:x} TO {:x}", a, b, TO);
 
-	rGPR[_inst.RD] = rra - immediate;
-*/
-
-	s32 immediate = _inst.SIMM_16;
-	rGPR[_inst.RD] = immediate - (int)rGPR[_inst.RA];
-	SetCarry((rGPR[_inst.RA] == 0) || (Helper_Carry(0 - rGPR[_inst.RA], immediate)));
+  if ((a < b && (TO & 0x10) != 0) || (a > b && (TO & 0x08) != 0) || (a == b && (TO & 0x04) != 0) ||
+      (u32(a) < u32(b) && (TO & 0x02) != 0) || (u32(a) > u32(b) && (TO & 0x01) != 0))
+  {
+    GenerateProgramException(ppc_state, ProgramExceptionCause::Trap);
+    interpreter.m_system.GetPowerPC().CheckExceptions();
+    interpreter.m_end_block = true;  // Dunno about this
+  }
 }
 
-void Interpreter::twi(UGeckoInstruction _inst)
+void Interpreter::xori(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	s32 a = rGPR[_inst.RA];
-	s32 b = _inst.SIMM_16;
-	s32 TO = _inst.TO;
-
-	DEBUG_LOG(POWERPC, "twi rA %x SIMM %x TO %0x", a, b, TO);
-
-	if (((a < b) && (TO & 0x10)) ||
-	    ((a > b) && (TO & 0x08)) ||
-	    ((a ==b) && (TO & 0x04)) ||
-	    (((u32)a <(u32)b) && (TO & 0x02)) ||
-	    (((u32)a >(u32)b) && (TO & 0x01)))
-	{
-		PowerPC::ppcState.Exceptions |= EXCEPTION_PROGRAM;
-		PowerPC::CheckExceptions();
-		m_EndBlock = true; // Dunno about this
-	}
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] ^ inst.UIMM;
 }
 
-void Interpreter::xori(UGeckoInstruction _inst)
+void Interpreter::xoris(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] ^ _inst.UIMM;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] ^ (u32{inst.UIMM} << 16);
 }
 
-void Interpreter::xoris(UGeckoInstruction _inst)
+void Interpreter::rlwimix(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] ^ (_inst.UIMM << 16);
+  const u32 mask = MakeRotationMask(inst.MB, inst.ME);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] =
+      (ppc_state.gpr[inst.RA] & ~mask) | (std::rotl(ppc_state.gpr[inst.RS], inst.SH) & mask);
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::rlwimix(UGeckoInstruction _inst)
+void Interpreter::rlwinmx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 mask = Helper_Mask(_inst.MB,_inst.ME);
-	rGPR[_inst.RA] = (rGPR[_inst.RA] & ~mask) | (_rotl(rGPR[_inst.RS],_inst.SH) & mask);
+  const u32 mask = MakeRotationMask(inst.MB, inst.ME);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = std::rotl(ppc_state.gpr[inst.RS], inst.SH) & mask;
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::rlwinmx(UGeckoInstruction _inst)
+void Interpreter::rlwnmx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 mask = Helper_Mask(_inst.MB,_inst.ME);
-	rGPR[_inst.RA] = _rotl(rGPR[_inst.RS],_inst.SH) & mask;
+  const u32 mask = MakeRotationMask(inst.MB, inst.ME);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = std::rotl(ppc_state.gpr[inst.RS], ppc_state.gpr[inst.RB] & 0x1F) & mask;
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::rlwnmx(UGeckoInstruction _inst)
+void Interpreter::andx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 mask = Helper_Mask(_inst.MB,_inst.ME);
-	rGPR[_inst.RA] = _rotl(rGPR[_inst.RS], rGPR[_inst.RB] & 0x1F) & mask;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] & ppc_state.gpr[inst.RB];
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::andx(UGeckoInstruction _inst)
+void Interpreter::andcx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] & rGPR[_inst.RB];
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] & ~ppc_state.gpr[inst.RB];
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::andcx(UGeckoInstruction _inst)
+void Interpreter::cmp(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] & ~rGPR[_inst.RB];
-
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s32 a = static_cast<s32>(ppc_state.gpr[inst.RA]);
+  const s32 b = static_cast<s32>(ppc_state.gpr[inst.RB]);
+  Helper_IntCompare(ppc_state, inst, a, b);
 }
 
-void Interpreter::cmp(UGeckoInstruction _inst)
+void Interpreter::cmpl(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	s32 a = (s32)rGPR[_inst.RA];
-	s32 b = (s32)rGPR[_inst.RB];
-	int fTemp;
-
-	if (a < b)
-		fTemp = 0x8;
-	else if (a > b)
-		fTemp = 0x4;
-	else // Equals
-		fTemp = 0x2;
-
-	if (GetXER_SO())
-		fTemp |= 0x1;
-
-	SetCRField(_inst.CRFD, fTemp);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  Helper_IntCompare(ppc_state, inst, a, b);
 }
 
-void Interpreter::cmpl(UGeckoInstruction _inst)
+void Interpreter::cntlzwx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	u32 fTemp;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = u32(std::countl_zero(ppc_state.gpr[inst.RS]));
 
-	if (a < b)
-		fTemp = 0x8;
-	else if (a > b)
-		fTemp = 0x4;
-	else // Equals
-		fTemp = 0x2;
-
-	if (GetXER_SO())
-		fTemp |= 0x1;
-
-	SetCRField(_inst.CRFD, fTemp);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::cntlzwx(UGeckoInstruction _inst)
+void Interpreter::eqvx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 val = rGPR[_inst.RS];
-	u32 mask = 0x80000000;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ~(ppc_state.gpr[inst.RS] ^ ppc_state.gpr[inst.RB]);
 
-	int i = 0;
-	for (; i < 32; i++, mask >>= 1)
-	{
-		if (val & mask)
-			break;
-	}
-
-	rGPR[_inst.RA] = i;
-
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::eqvx(UGeckoInstruction _inst)
+void Interpreter::extsbx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = ~(rGPR[_inst.RS] ^ rGPR[_inst.RB]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = u32(s32(s8(ppc_state.gpr[inst.RS])));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::extsbx(UGeckoInstruction _inst)
+void Interpreter::extshx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = (u32)(s32)(s8)rGPR[_inst.RS];
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = u32(s32(s16(ppc_state.gpr[inst.RS])));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::extshx(UGeckoInstruction _inst)
+void Interpreter::nandx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = (u32)(s32)(s16)rGPR[_inst.RS];
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ~(ppc_state.gpr[inst.RS] & ppc_state.gpr[inst.RB]);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::nandx(UGeckoInstruction _inst)
+void Interpreter::norx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = ~(rGPR[_inst.RS] & rGPR[_inst.RB]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ~(ppc_state.gpr[inst.RS] | ppc_state.gpr[inst.RB]);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::norx(UGeckoInstruction _inst)
+void Interpreter::orx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = ~(rGPR[_inst.RS] | rGPR[_inst.RB]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] | ppc_state.gpr[inst.RB];
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::orx(UGeckoInstruction _inst)
+void Interpreter::orcx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] | rGPR[_inst.RB];
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] | (~ppc_state.gpr[inst.RB]);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::orcx(UGeckoInstruction _inst)
+void Interpreter::slwx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] | (~rGPR[_inst.RB]);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 amount = ppc_state.gpr[inst.RB];
+  ppc_state.gpr[inst.RA] = (amount & 0x20) != 0 ? 0 : ppc_state.gpr[inst.RS] << (amount & 0x1f);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::slwx(UGeckoInstruction _inst)
+void Interpreter::srawx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 amount = rGPR[_inst.RB];
-	rGPR[_inst.RA] = (amount & 0x20) ? 0 : rGPR[_inst.RS] << (amount & 0x1f);
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 rb = ppc_state.gpr[inst.RB];
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if ((rb & 0x20) != 0)
+  {
+    if ((ppc_state.gpr[inst.RS] & 0x80000000) != 0)
+    {
+      ppc_state.gpr[inst.RA] = 0xFFFFFFFF;
+      ppc_state.SetCarry(1);
+    }
+    else
+    {
+      ppc_state.gpr[inst.RA] = 0x00000000;
+      ppc_state.SetCarry(0);
+    }
+  }
+  else
+  {
+    const u32 amount = rb & 0x1f;
+    const s32 rrs = s32(ppc_state.gpr[inst.RS]);
+    ppc_state.gpr[inst.RA] = u32(rrs >> amount);
+
+    ppc_state.SetCarry(rrs < 0 && amount > 0 && (u32(rrs) << (32 - amount)) != 0);
+  }
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::srawx(UGeckoInstruction _inst)
+void Interpreter::srawix(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	int rb = rGPR[_inst.RB];
+  const u32 amount = inst.SH;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s32 rrs = s32(ppc_state.gpr[inst.RS]);
 
-	if (rb & 0x20)
-	{
-		if (rGPR[_inst.RS] & 0x80000000)
-		{
-			rGPR[_inst.RA] = 0xFFFFFFFF;
-			SetCarry(1);
-		}
-		else
-		{
-			rGPR[_inst.RA] = 0x00000000;
-			SetCarry(0);
-		}
-	}
-	else
-	{
-		int amount = rb & 0x1f;
-		if (amount == 0)
-		{
-			rGPR[_inst.RA] = rGPR[_inst.RS];
-			SetCarry(0);
-		}
-		else
-		{
-			s32 rrs = rGPR[_inst.RS];
-			rGPR[_inst.RA] = rrs >> amount;
+  ppc_state.gpr[inst.RA] = u32(rrs >> amount);
+  ppc_state.SetCarry(rrs < 0 && amount > 0 && (u32(rrs) << (32 - amount)) != 0);
 
-			if ((rrs < 0) && (rrs << (32 - amount)))
-				SetCarry(1);
-			else
-				SetCarry(0);
-		}
-	}
-
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::srawix(UGeckoInstruction _inst)
+void Interpreter::srwx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	int amount = _inst.SH;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 amount = ppc_state.gpr[inst.RB];
+  ppc_state.gpr[inst.RA] = (amount & 0x20) != 0 ? 0 : (ppc_state.gpr[inst.RS] >> (amount & 0x1f));
 
-	if (amount != 0)
-	{
-		s32 rrs = rGPR[_inst.RS];
-		rGPR[_inst.RA] = rrs >> amount;
-
-		if ((rrs < 0) && (rrs << (32 - amount)))
-			SetCarry(1);
-		else
-			SetCarry(0);
-	}
-	else
-	{
-		SetCarry(0);
-		rGPR[_inst.RA] = rGPR[_inst.RS];
-	}
-
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::srwx(UGeckoInstruction _inst)
+void Interpreter::tw(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 amount = rGPR[_inst.RB];
-	rGPR[_inst.RA] = (amount & 0x20) ? 0 : (rGPR[_inst.RS] >> (amount & 0x1f));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s32 a = s32(ppc_state.gpr[inst.RA]);
+  const s32 b = s32(ppc_state.gpr[inst.RB]);
+  const u32 TO = inst.TO;
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  DEBUG_LOG_FMT(POWERPC, "tw rA {:x} rB {:x} TO {:x}", a, b, TO);
+
+  if ((a < b && (TO & 0x10) != 0) || (a > b && (TO & 0x08) != 0) || (a == b && (TO & 0x04) != 0) ||
+      ((u32(a) < u32(b)) && (TO & 0x02) != 0) || ((u32(a) > u32(b)) && (TO & 0x01) != 0))
+  {
+    GenerateProgramException(ppc_state, ProgramExceptionCause::Trap);
+    interpreter.m_system.GetPowerPC().CheckExceptions();
+    interpreter.m_end_block = true;  // Dunno about this
+  }
 }
 
-void Interpreter::tw(UGeckoInstruction _inst)
+void Interpreter::xorx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	s32 a = rGPR[_inst.RA];
-	s32 b = rGPR[_inst.RB];
-	s32 TO = _inst.TO;
+  auto& ppc_state = interpreter.m_ppc_state;
+  ppc_state.gpr[inst.RA] = ppc_state.gpr[inst.RS] ^ ppc_state.gpr[inst.RB];
 
-	DEBUG_LOG(POWERPC, "tw rA %0x rB %0x TO %0x", a, b, TO);
-
-	if (((a < b) && (TO & 0x10)) ||
-	    ((a > b) && (TO & 0x08)) ||
-	    ((a ==b) && (TO & 0x04)) ||
-	    (((u32)a <(u32)b) && (TO & 0x02)) ||
-	    (((u32)a >(u32)b) && (TO & 0x01)))
-	{
-		PowerPC::ppcState.Exceptions |= EXCEPTION_PROGRAM;
-		PowerPC::CheckExceptions();
-		m_EndBlock = true; // Dunno about this
-	}
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RA]);
 }
 
-void Interpreter::xorx(UGeckoInstruction _inst)
+static bool HasAddOverflowed(u32 x, u32 y, u32 result)
 {
-	rGPR[_inst.RA] = rGPR[_inst.RS] ^ rGPR[_inst.RB];
-
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RA]);
+  // If x and y have the same sign, but the result is different
+  // then an overflow has occurred.
+  return (((x ^ result) & (y ^ result)) >> 31) != 0;
 }
 
-void Interpreter::addx(UGeckoInstruction _inst)
+void Interpreter::addx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RD] = rGPR[_inst.RA] + rGPR[_inst.RB];
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const u32 result = a + b;
 
-	if (_inst.OE)
-		PanicAlert("OE: addx");
+  ppc_state.gpr[inst.RD] = result;
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::addcx(UGeckoInstruction _inst)
+void Interpreter::addcx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	rGPR[_inst.RD] = a + b;
-	SetCarry(Helper_Carry(a,b));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const u32 result = a + b;
 
-	if (_inst.OE)
-		PanicAlert("OE: addcx");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, b));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::addex(UGeckoInstruction _inst)
+void Interpreter::addex(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	int carry = GetCarry();
-	int a = rGPR[_inst.RA];
-	int b = rGPR[_inst.RB];
-	rGPR[_inst.RD] = a + b + carry;
-	SetCarry(Helper_Carry(a, b) || (carry != 0 && Helper_Carry(a + b, carry)));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 carry = ppc_state.GetCarry();
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const u32 result = a + b + carry;
 
-	if (_inst.OE)
-		PanicAlert("OE: addex");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, b) || (carry != 0 && Helper_Carry(a + b, carry)));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::addmex(UGeckoInstruction _inst)
+void Interpreter::addmex(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	int carry = GetCarry();
-	int a = rGPR[_inst.RA];
-	rGPR[_inst.RD] = a + carry - 1;
-	SetCarry(Helper_Carry(a, carry - 1));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 carry = ppc_state.GetCarry();
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = 0xFFFFFFFF;
+  const u32 result = a + b + carry;
 
-	if (_inst.OE)
-		PanicAlert("OE: addmex");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, carry - 1));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::addzex(UGeckoInstruction _inst)
+void Interpreter::addzex(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	int carry = GetCarry();
-	int a = rGPR[_inst.RA];
-	rGPR[_inst.RD] = a + carry;
-	SetCarry(Helper_Carry(a, carry));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 carry = ppc_state.GetCarry();
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 result = a + carry;
 
-	if (_inst.OE)
-		PanicAlert("OE: addzex");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, carry));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, 0, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::divwx(UGeckoInstruction _inst)
+void Interpreter::divwx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	s32 a = rGPR[_inst.RA];
-	s32 b = rGPR[_inst.RB];
+  auto& ppc_state = interpreter.m_ppc_state;
+  const auto a = s32(ppc_state.gpr[inst.RA]);
+  const auto b = s32(ppc_state.gpr[inst.RB]);
+  const bool overflow = b == 0 || (static_cast<u32>(a) == 0x80000000 && b == -1);
 
-	if (b == 0 || ((u32)a == 0x80000000 && b == -1))
-	{
-		if (_inst.OE)
-		{
-			// should set OV
-			PanicAlert("OE: divwx");
-		}
+  if (overflow)
+  {
+    if (a < 0)
+      ppc_state.gpr[inst.RD] = UINT32_MAX;
+    else
+      ppc_state.gpr[inst.RD] = 0;
+  }
+  else
+  {
+    ppc_state.gpr[inst.RD] = static_cast<u32>(a / b);
+  }
 
-		if (((u32)a & 0x80000000) && b == 0)
-			rGPR[_inst.RD] = -1;
-		else
-			rGPR[_inst.RD] = 0;
-	}
-	else
-	{
-		rGPR[_inst.RD] = (u32)(a / b);
-	}
+  if (inst.OE)
+    ppc_state.SetXER_OV(overflow);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RD]);
 }
 
-
-void Interpreter::divwux(UGeckoInstruction _inst)
+void Interpreter::divwux(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const bool overflow = b == 0;
 
-	if (b == 0)
-	{
-		if (_inst.OE)
-		{
-			// should set OV
-			PanicAlert("OE: divwux");
-		}
+  if (overflow)
+  {
+    ppc_state.gpr[inst.RD] = 0;
+  }
+  else
+  {
+    ppc_state.gpr[inst.RD] = a / b;
+  }
 
-		rGPR[_inst.RD] = 0;
-	}
-	else
-	{
-		rGPR[_inst.RD] = a / b;
-	}
+  if (inst.OE)
+    ppc_state.SetXER_OV(overflow);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RD]);
 }
 
-void Interpreter::mulhwx(UGeckoInstruction _inst)
+void Interpreter::mulhwx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	u32 d = (u32)((u64)(((s64)(s32)a * (s64)(s32)b) ) >> 32);  // This can be done better. Not in plain C/C++ though.
-	rGPR[_inst.RD] = d;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s64 a = static_cast<s32>(ppc_state.gpr[inst.RA]);
+  const s64 b = static_cast<s32>(ppc_state.gpr[inst.RB]);
+  const u32 d = static_cast<u32>((a * b) >> 32);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  ppc_state.gpr[inst.RD] = d;
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, d);
 }
 
-void Interpreter::mulhwux(UGeckoInstruction _inst)
+void Interpreter::mulhwux(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	u32 d = (u32)(((u64)a * (u64)b) >> 32);
-	rGPR[_inst.RD] = d;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u64 a = ppc_state.gpr[inst.RA];
+  const u64 b = ppc_state.gpr[inst.RB];
+  const u32 d = static_cast<u32>((a * b) >> 32);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  ppc_state.gpr[inst.RD] = d;
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, d);
 }
 
-void Interpreter::mullwx(UGeckoInstruction _inst)
+void Interpreter::mullwx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	u32 d = (u32)((s32)a * (s32)b);
-	rGPR[_inst.RD] = d;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const s64 a = static_cast<s32>(ppc_state.gpr[inst.RA]);
+  const s64 b = static_cast<s32>(ppc_state.gpr[inst.RB]);
+  const s64 result = a * b;
 
-	if (_inst.OE)
-		PanicAlert("OE: mullwx");
+  ppc_state.gpr[inst.RD] = static_cast<u32>(result);
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(result < -0x80000000LL || result > 0x7FFFFFFFLL);
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RD]);
 }
 
-void Interpreter::negx(UGeckoInstruction _inst)
+void Interpreter::negx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RD] = (~rGPR[_inst.RA]) + 1;
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ppc_state.gpr[inst.RA];
 
-	if (rGPR[_inst.RD] == 0x80000000)
-	{
-		if (_inst.OE)
-			PanicAlert("OE: negx");
-	}
+  ppc_state.gpr[inst.RD] = (~a) + 1;
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(a == 0x80000000);
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, ppc_state.gpr[inst.RD]);
 }
 
-void Interpreter::subfx(UGeckoInstruction _inst)
+void Interpreter::subfx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	rGPR[_inst.RD] = rGPR[_inst.RB] - rGPR[_inst.RA];
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ~ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const u32 result = a + b + 1;
 
-	if (_inst.OE)
-		PanicAlert("OE: subfx");
+  ppc_state.gpr[inst.RD] = result;
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::subfcx(UGeckoInstruction _inst)
+void Interpreter::subfcx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	rGPR[_inst.RD] = b - a;
-	SetCarry(a == 0 || Helper_Carry(b, 0-a));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ~ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const u32 result = a + b + 1;
 
-	if (_inst.OE)
-		PanicAlert("OE: subfcx");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(a == 0xFFFFFFFF || Helper_Carry(b, a + 1));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
-void Interpreter::subfex(UGeckoInstruction _inst)
+void Interpreter::subfex(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	u32 b = rGPR[_inst.RB];
-	int carry = GetCarry();
-	rGPR[_inst.RD] = (~a) + b + carry;
-	SetCarry(Helper_Carry(~a, b) || Helper_Carry((~a) + b, carry));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ~ppc_state.gpr[inst.RA];
+  const u32 b = ppc_state.gpr[inst.RB];
+  const u32 carry = ppc_state.GetCarry();
+  const u32 result = a + b + carry;
 
-	if (_inst.OE)
-		PanicAlert("OE: subfex");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, b) || Helper_Carry(a + b, carry));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
 // sub from minus one
-void Interpreter::subfmex(UGeckoInstruction _inst)
+void Interpreter::subfmex(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	int carry = GetCarry();
-	rGPR[_inst.RD] = (~a) + carry - 1;
-	SetCarry(Helper_Carry(~a, carry - 1));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ~ppc_state.gpr[inst.RA];
+  const u32 b = 0xFFFFFFFF;
+  const u32 carry = ppc_state.GetCarry();
+  const u32 result = a + b + carry;
 
-	if (_inst.OE)
-		PanicAlert("OE: subfmex");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, carry - 1));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, b, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }
 
 // sub from zero
-void Interpreter::subfzex(UGeckoInstruction _inst)
+void Interpreter::subfzex(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	u32 a = rGPR[_inst.RA];
-	int carry = GetCarry();
-	rGPR[_inst.RD] = (~a) + carry;
-	SetCarry(Helper_Carry(~a, carry));
+  auto& ppc_state = interpreter.m_ppc_state;
+  const u32 a = ~ppc_state.gpr[inst.RA];
+  const u32 carry = ppc_state.GetCarry();
+  const u32 result = a + carry;
 
-	if (_inst.OE)
-		PanicAlert("OE: subfzex");
+  ppc_state.gpr[inst.RD] = result;
+  ppc_state.SetCarry(Helper_Carry(a, carry));
 
-	if (_inst.Rc)
-		Helper_UpdateCR0(rGPR[_inst.RD]);
+  if (inst.OE)
+    ppc_state.SetXER_OV(HasAddOverflowed(a, 0, result));
+
+  if (inst.Rc)
+    Helper_UpdateCR0(ppc_state, result);
 }

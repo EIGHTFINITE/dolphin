@@ -1,346 +1,318 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-#include <map>
-#include <sstream>
-
-#include "Common/StringUtil.h"
 #include "InputCommon/ControllerInterface/SDL/SDL.h"
 
+#include <span>
+#include <thread>
+#include <vector>
+
 #ifdef _WIN32
-#pragma comment(lib, "SDL2.lib")
+#include <Windows.h>
 #endif
 
-namespace ciface
-{
-namespace SDL
+#include <SDL3/SDL.h>
+
+#include "Common/Event.h"
+#include "Common/Logging/Log.h"
+#include "Common/ScopeGuard.h"
+#include "Common/Thread.h"
+
+#include "Core/Config/MainSettings.h"
+#include "Core/HW/SI/SI.h"
+#include "Core/HW/SI/SI_Device.h"
+
+#include "InputCommon/ControllerInterface/ControllerInterface.h"
+#include "InputCommon/ControllerInterface/SDL/SDLGamepad.h"
+
+namespace ciface::SDL
 {
 
-// 10ms = 100Hz which homebrew docs very roughly imply is within WiiMote normal
-// range, used for periodic haptic effects though often ignored by devices
-static const u16 RUMBLE_PERIOD = 10;
-static const u16 RUMBLE_LENGTH_MAX = 500; // ms: enough to span multiple frames at low FPS, but still finite
-
-static std::string GetJoystickName(int index)
+class InputBackend final : public ciface::InputBackend
 {
-#if SDL_VERSION_ATLEAST(2, 0, 0)
-	return SDL_JoystickNameForIndex(index);
-#else
-	return SDL_JoystickName(index);
-#endif
+public:
+  InputBackend(ControllerInterface* controller_interface);
+  ~InputBackend() override;
+  void PopulateDevices() override;
+  void UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>& devices_to_remove) override;
+
+private:
+  void OpenAndAddDevice(SDL_JoystickID instance_id);
+
+  bool HandleEventAndContinue(const SDL_Event& e);
+
+  Common::Event m_init_event;
+  Uint32 m_stop_event_type;
+  Uint32 m_populate_event_type;
+  std::thread m_hotplug_thread;
+};
+
+std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface)
+{
+  return std::make_unique<InputBackend>(controller_interface);
 }
 
-void Init( std::vector<Core::Device*>& devices )
+static void EnableSDLLogging()
 {
-	// this is used to number the joysticks
-	// multiple joysticks with the same name shall get unique ids starting at 0
-	std::map<std::string, int> name_counts;
+  SDL_SetLogPriorities(SDL_LOG_PRIORITY_VERBOSE);
+  SDL_SetLogOutputFunction(
+      [](void*, int category, SDL_LogPriority priority, const char* message) {
+        std::string_view category_name{};
+        switch (category)
+        {
+        case SDL_LOG_CATEGORY_APPLICATION:
+          category_name = "app";
+          break;
+        case SDL_LOG_CATEGORY_ERROR:
+          category_name = "error";
+          break;
+        case SDL_LOG_CATEGORY_ASSERT:
+          category_name = "assert";
+          break;
+        case SDL_LOG_CATEGORY_SYSTEM:
+          category_name = "system";
+          break;
+        case SDL_LOG_CATEGORY_AUDIO:
+          category_name = "audio";
+          break;
+        case SDL_LOG_CATEGORY_VIDEO:
+          category_name = "video";
+          break;
+        case SDL_LOG_CATEGORY_RENDER:
+          category_name = "render";
+          break;
+        case SDL_LOG_CATEGORY_INPUT:
+          category_name = "input";
+          break;
+        case SDL_LOG_CATEGORY_TEST:
+          category_name = "test";
+          break;
+        case SDL_LOG_CATEGORY_GPU:
+          category_name = "gpu";
+          break;
+        default:
+          break;
+        }
 
-#ifdef USE_SDL_HAPTIC
-	if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC) >= 0)
-	{
-		// Correctly initialized
-	}
-	else
-#endif
-	if (SDL_Init(SDL_INIT_JOYSTICK) < 0)
-	{
-		// Failed to initialize
-		return;
-	}
+        auto log_level = Common::Log::LogLevel::LNOTICE;
+        switch (priority)
+        {
+        case SDL_LOG_PRIORITY_VERBOSE:
+        case SDL_LOG_PRIORITY_DEBUG:
+          log_level = Common::Log::LogLevel::LDEBUG;
+          break;
+        case SDL_LOG_PRIORITY_INFO:
+          log_level = Common::Log::LogLevel::LINFO;
+          break;
+        case SDL_LOG_PRIORITY_WARN:
+          log_level = Common::Log::LogLevel::LWARNING;
+          break;
+        case SDL_LOG_PRIORITY_ERROR:
+          log_level = Common::Log::LogLevel::LERROR;
+          break;
+        case SDL_LOG_PRIORITY_CRITICAL:
+        default:
+          log_level = Common::Log::LogLevel::LNOTICE;
+          break;
+        }
 
-	// joysticks
-	for (int i = 0; i < SDL_NumJoysticks(); ++i)
-	{
-		SDL_Joystick* dev = SDL_JoystickOpen(i);
-		if (dev)
-		{
-			Joystick* js = new Joystick(dev, i, name_counts[GetJoystickName(i)]++);
-			// only add if it has some inputs/outputs
-			if (js->Inputs().size() || js->Outputs().size())
-				devices.push_back( js );
-			else
-				delete js;
-		}
-	}
+        if (category_name.empty())
+        {
+          GENERIC_LOG_FMT(Common::Log::LogType::CONTROLLERINTERFACE, log_level, "unknown({}): {}",
+                          category, message);
+        }
+        else
+        {
+          GENERIC_LOG_FMT(Common::Log::LogType::CONTROLLERINTERFACE, log_level, "{}: {}",
+                          category_name, message);
+        }
+      },
+      nullptr);
 }
 
-Joystick::Joystick(SDL_Joystick* const joystick, const int sdl_index, const unsigned int index)
-	: m_joystick(joystick)
-	, m_sdl_index(sdl_index)
-	, m_index(index)
+InputBackend::InputBackend(ControllerInterface* controller_interface)
+    : ciface::InputBackend(controller_interface)
 {
-	// really bad HACKS:
-	// to not use SDL for an XInput device
-	// too many people on the forums pick the SDL device and ask:
-	// "why don't my 360 gamepad triggers/rumble work correctly"
-#ifdef _WIN32
-	// checking the name is probably good (and hacky) enough
-	// but I'll double check with the num of buttons/axes
-	std::string lcasename = GetName();
-	std::transform(lcasename.begin(), lcasename.end(), lcasename.begin(), tolower);
+  EnableSDLLogging();
 
-	if ((std::string::npos != lcasename.find("xbox 360")) &&
-	    (10 == SDL_JoystickNumButtons(joystick)) &&
-	    (5 == SDL_JoystickNumAxes(joystick)) &&
-	    (1 == SDL_JoystickNumHats(joystick)) &&
-	    (0 == SDL_JoystickNumBalls(joystick)))
-	{
-		// this device won't be used
-		return;
-	}
-#endif
+  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_ENHANCED_REPORTS) == "")
+    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
 
-	if (SDL_JoystickNumButtons(joystick) > 255 ||
-	    SDL_JoystickNumAxes(joystick) > 255 ||
-	    SDL_JoystickNumHats(joystick) > 255 ||
-	    SDL_JoystickNumBalls(joystick) > 255)
-	{
-		// This device is invalid, don't use it
-		// Some crazy devices(HP webcam 2100) end up as HID devices
-		// SDL tries parsing these as joysticks
-		return;
-	}
+  // We have our own WGI backend. Enabling SDL's WGI handling creates even more redundant devices.
+  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_WGI) == "")
+    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_WGI, "0");
 
-	// get buttons
-	for (u8 i = 0; i != SDL_JoystickNumButtons(m_joystick); ++i)
-		AddInput(new Button(i, m_joystick));
+  // Disable DualSense Player LEDs; We already colorize the Primary LED
+  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED) == "")
+    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "0");
 
-	// get hats
-	for (u8 i = 0; i != SDL_JoystickNumHats(m_joystick); ++i)
-	{
-		// each hat gets 4 input instances associated with it, (up down left right)
-		for (u8 d = 0; d != 4; ++d)
-			AddInput(new Hat(i, m_joystick, d));
-	}
+  // Disabling DirectInput support apparently solves hangs on shutdown for users with
+  //  "8BitDo Ultimate 2" controllers, however, it also breaks hotplug support for Dual Sense
+  //  and DS4 Controllers, so we leave it enabled for now.
+  // It also works around a possibly related random hang on a IDirectInputDevice8_Acquire
+  //  call within SDL.
+  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT) == "")
+    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT, "1");
 
-	// get axes
-	for (u8 i = 0; i != SDL_JoystickNumAxes(m_joystick); ++i)
-	{
-		// each axis gets a negative and a positive input instance associated with it
-		AddAnalogInputs(new Axis(i, m_joystick, -32768),
-			new Axis(i, m_joystick, 32767));
-	}
+  // Pre-populate the default Joy-Con hints so they can be easily changed
+  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS) == "")
+    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS, "1");
 
-#ifdef USE_SDL_HAPTIC
-	// try to get supported ff effects
-	m_haptic = SDL_HapticOpenFromJoystick( m_joystick );
-	if (m_haptic)
-	{
-		//SDL_HapticSetGain( m_haptic, 1000 );
-		//SDL_HapticSetAutocenter( m_haptic, 0 );
+  if (Config::Get(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS) == "")
+    Config::SetBase(Config::MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS, "0");
 
-		const unsigned int supported_effects = SDL_HapticQuery( m_haptic );
+  // Disable SDL's GC Adapter handling when we want to handle it ourselves.
+  bool is_gc_adapter_configured = false;
+  for (int i = 0; i != SerialInterface::MAX_SI_CHANNELS; ++i)
+  {
+    if (Config::Get(Config::GetInfoForSIDevice(i)) == SerialInterface::SIDEVICE_WIIU_ADAPTER)
+    {
+      is_gc_adapter_configured = true;
+      break;
+    }
+  }
+  // TODO: This hint should be adjusted when the config changes,
+  //  but SDL requires it be set before joystick initialization,
+  //  and ControllerInterface isn't prepared for SDL to spontaneously re-initialize itself.
+  SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, is_gc_adapter_configured ? "0" : "1");
 
-		// constant effect
-		if (supported_effects & SDL_HAPTIC_CONSTANT)
-			AddOutput(new ConstantEffect(m_haptic));
+  // Load all the hints from the config file
+  std::shared_ptr<Config::Layer> layer = Config::GetLayer(Config::LayerType::Base);
+  const Config::Section& section = layer->GetSection(Config::System::Main, "SDL_Hints");
+  for (auto& row_data : section)
+  {
+    const Config::Location& location = row_data.first;
+    const std::optional<std::string>& value = row_data.second;
 
-		// ramp effect
-		if (supported_effects & SDL_HAPTIC_RAMP)
-			AddOutput(new RampEffect(m_haptic));
+    if (value)
+      SDL_SetHint(location.key.c_str(), value->c_str());
+  }
 
-		// sine effect
-		if (supported_effects & SDL_HAPTIC_SINE)
-			AddOutput(new SineEffect(m_haptic));
+  m_hotplug_thread = std::thread([this] {
+    Common::SetCurrentThreadName("SDL Hotplug Thread");
 
-		// triangle effect
-		if (supported_effects & SDL_HAPTIC_TRIANGLE)
-			AddOutput(new TriangleEffect(m_haptic));
+    Common::ScopeGuard quit_guard([] {
+      // TODO: there seems to be some sort of memory leak with SDL, quit isn't freeing everything up
+      SDL_Quit();
+    });
+    {
+      Common::ScopeGuard init_guard([this] { m_init_event.Set(); });
 
-		// left-right effect
-		if (supported_effects & SDL_HAPTIC_LEFTRIGHT)
-			AddOutput(new LeftRightEffect(m_haptic));
-	}
-#endif
+      if (!SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC | SDL_INIT_GAMEPAD))
+      {
+        ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to initialize");
+        return;
+      }
 
+      const Uint32 custom_events_start = SDL_RegisterEvents(2);
+      if (custom_events_start == static_cast<Uint32>(-1))
+      {
+        ERROR_LOG_FMT(CONTROLLERINTERFACE, "SDL failed to register custom events");
+        return;
+      }
+      m_stop_event_type = custom_events_start;
+      m_populate_event_type = custom_events_start + 1;
+
+      // Drain all of the events and add the initial joysticks before returning. Otherwise, the
+      // individual joystick events as well as the custom populate event will be handled _after_
+      // ControllerInterface::Init/RefreshDevices has cleared its list of devices, resulting in
+      // duplicate devices. Adding devices will actually "fail" here, as the ControllerInterface
+      // hasn't finished initializing yet.
+      SDL_Event e;
+      while (SDL_PollEvent(&e))
+      {
+        if (!HandleEventAndContinue(e))
+          return;
+      }
+    }
+
+    SDL_Event e;
+    while (SDL_WaitEvent(&e))
+    {
+      if (!HandleEventAndContinue(e))
+        return;
+    }
+  });
+
+  m_init_event.Wait();
 }
 
-Joystick::~Joystick()
+InputBackend::~InputBackend()
 {
-#ifdef USE_SDL_HAPTIC
-	if (m_haptic)
-	{
-		// stop/destroy all effects
-		SDL_HapticStopAll(m_haptic);
-		// close haptic first
-		SDL_HapticClose(m_haptic);
-	}
-#endif
+  if (!m_hotplug_thread.joinable())
+    return;
 
-	// close joystick
-	SDL_JoystickClose(m_joystick);
+  SDL_Event stop_event{m_stop_event_type};
+  SDL_PushEvent(&stop_event);
+
+  m_hotplug_thread.join();
 }
 
-#ifdef USE_SDL_HAPTIC
-void Joystick::HapticEffect::Update()
+void InputBackend::PopulateDevices()
 {
-	if (m_id == -1 && m_effect.type > 0)
-	{
-		m_id = SDL_HapticNewEffect(m_haptic, &m_effect);
-		if (m_id > -1)
-			SDL_HapticRunEffect(m_haptic, m_id, 1);
-	}
-	else if (m_id > -1 && m_effect.type == 0)
-	{
-		SDL_HapticStopEffect(m_haptic, m_id);
-		SDL_HapticDestroyEffect(m_haptic, m_id);
-		m_id = -1;
-	}
-	else if (m_id > -1)
-	{
-		SDL_HapticUpdateEffect(m_haptic, m_id, &m_effect);
-	}
+  if (!m_hotplug_thread.joinable())
+    return;
+
+  SDL_Event populate_event{m_populate_event_type};
+  SDL_PushEvent(&populate_event);
 }
 
-std::string Joystick::ConstantEffect::GetName() const
+void InputBackend::UpdateInput(std::vector<std::weak_ptr<ciface::Core::Device>>&)
 {
-	return "Constant";
+  SDL_UpdateGamepads();
 }
 
-std::string Joystick::RampEffect::GetName() const
+void InputBackend::OpenAndAddDevice(SDL_JoystickID instance_id)
 {
-	return "Ramp";
+  SDL_Gamepad* gc = SDL_OpenGamepad(instance_id);
+  SDL_Joystick* js = SDL_OpenJoystick(instance_id);
+
+  if (js != nullptr)
+  {
+    if (SDL_GetNumJoystickButtons(js) > 255 || SDL_GetNumJoystickAxes(js) > 255 ||
+        SDL_GetNumJoystickHats(js) > 255 || SDL_GetNumJoystickBalls(js) > 255)
+    {
+      // This device is invalid, don't use it
+      // Some crazy devices (HP webcam 2100) end up as HID devices
+      // SDL tries parsing these as Joysticks
+      return;
+    }
+    auto gamepad = std::make_shared<Gamepad>(gc, js);
+    if (!gamepad->Inputs().empty() || !gamepad->Outputs().empty())
+      GetControllerInterface().AddDevice(std::move(gamepad));
+  }
 }
 
-std::string Joystick::SineEffect::GetName() const
+bool InputBackend::HandleEventAndContinue(const SDL_Event& e)
 {
-	return "Sine";
+  if (e.type == SDL_EVENT_JOYSTICK_ADDED)
+  {
+    OpenAndAddDevice(e.jdevice.which);
+  }
+  else if (e.type == SDL_EVENT_JOYSTICK_REMOVED)
+  {
+    GetControllerInterface().RemoveDevice([&e](const auto* device) {
+      return device->GetSource() == "SDL" &&
+             static_cast<const Gamepad*>(device)->GetSDLInstanceID() == e.jdevice.which;
+    });
+  }
+  else if (e.type == m_populate_event_type)
+  {
+    GetControllerInterface().PlatformPopulateDevices([this] {
+      int joystick_count = 0;
+      auto* const joystick_ids = SDL_GetJoysticks(&joystick_count);
+      for (auto instance_id : std::span(joystick_ids, joystick_count))
+        OpenAndAddDevice(instance_id);
+
+      SDL_free(joystick_ids);
+    });
+  }
+  else if (e.type == m_stop_event_type)
+  {
+    return false;
+  }
+
+  return true;
 }
 
-std::string Joystick::TriangleEffect::GetName() const
-{
-	return "Triangle";
-}
-
-std::string Joystick::LeftRightEffect::GetName() const
-{
-	return "LeftRight";
-}
-
-void Joystick::HapticEffect::SetState(ControlState state)
-{
-	memset(&m_effect, 0, sizeof(m_effect));
-	if (state)
-	{
-		SetSDLHapticEffect(state);
-	}
-	else
-	{
-		// this module uses type==0 to indicate 'off'
-		m_effect.type = 0;
-	}
-	Update();
-}
-
-void Joystick::ConstantEffect::SetSDLHapticEffect(ControlState state)
-{
-	m_effect.type = SDL_HAPTIC_CONSTANT;
-	m_effect.constant.length = RUMBLE_LENGTH_MAX;
-	m_effect.constant.level = (Sint16)(state * 0x7FFF);
-}
-
-void Joystick::RampEffect::SetSDLHapticEffect(ControlState state)
-{
-	m_effect.type = SDL_HAPTIC_RAMP;
-	m_effect.ramp.length = RUMBLE_LENGTH_MAX;
-	m_effect.ramp.start = (Sint16)(state * 0x7FFF);
-}
-
-void Joystick::SineEffect::SetSDLHapticEffect(ControlState state)
-{
-	m_effect.type = SDL_HAPTIC_SINE;
-	m_effect.periodic.period = RUMBLE_PERIOD;
-	m_effect.periodic.magnitude = (Sint16)(state * 0x7FFF);
-	m_effect.periodic.offset = 0;
-	m_effect.periodic.phase = 18000;
-	m_effect.periodic.length = RUMBLE_LENGTH_MAX;
-	m_effect.periodic.delay = 0;
-	m_effect.periodic.attack_length = 0;
-}
-
-void Joystick::TriangleEffect::SetSDLHapticEffect(ControlState state)
-{
-	m_effect.type = SDL_HAPTIC_TRIANGLE;
-	m_effect.periodic.period = RUMBLE_PERIOD;
-	m_effect.periodic.magnitude = (Sint16)(state * 0x7FFF);
-	m_effect.periodic.offset = 0;
-	m_effect.periodic.phase = 18000;
-	m_effect.periodic.length = RUMBLE_LENGTH_MAX;
-	m_effect.periodic.delay = 0;
-	m_effect.periodic.attack_length = 0;
-}
-
-void Joystick::LeftRightEffect::SetSDLHapticEffect(ControlState state)
-{
-	m_effect.type = SDL_HAPTIC_LEFTRIGHT;
-	m_effect.leftright.length = RUMBLE_LENGTH_MAX;
-	// max ranges tuned to 'feel' similar in magnitude to triangle/sine on xbox360 controller
-	m_effect.leftright.large_magnitude = (Uint16)(state * 0x4000);
-	m_effect.leftright.small_magnitude = (Uint16)(state * 0xFFFF);
-}
-#endif
-
-void Joystick::UpdateInput()
-{
-	// each joystick is doin this, o well
-	SDL_JoystickUpdate();
-}
-
-std::string Joystick::GetName() const
-{
-	return StripSpaces(GetJoystickName(m_sdl_index));
-}
-
-std::string Joystick::GetSource() const
-{
-	return "SDL";
-}
-
-int Joystick::GetId() const
-{
-	return m_index;
-}
-
-std::string Joystick::Button::GetName() const
-{
-	std::ostringstream ss;
-	ss << "Button " << (int)m_index;
-	return ss.str();
-}
-
-std::string Joystick::Axis::GetName() const
-{
-	std::ostringstream ss;
-	ss << "Axis " << (int)m_index << (m_range<0 ? '-' : '+');
-	return ss.str();
-}
-
-std::string Joystick::Hat::GetName() const
-{
-	static char tmpstr[] = "Hat . .";
-	// I don't think more than 10 hats are supported
-	tmpstr[4] = (char)('0' + m_index);
-	tmpstr[6] = "NESW"[m_direction];
-	return tmpstr;
-}
-
-ControlState Joystick::Button::GetState() const
-{
-	return SDL_JoystickGetButton(m_js, m_index);
-}
-
-ControlState Joystick::Axis::GetState() const
-{
-	return std::max(0.0, ControlState(SDL_JoystickGetAxis(m_js, m_index)) / m_range);
-}
-
-ControlState Joystick::Hat::GetState() const
-{
-	return (SDL_JoystickGetHat(m_js, m_index) & (1 << m_direction)) > 0;
-}
-
-}
-}
+}  // namespace ciface::SDL

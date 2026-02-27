@@ -1,6 +1,5 @@
 // Copyright 2015 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -8,11 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "InputCommon/ControllerInterface/Device.h"
+#include "InputCommon/ControllerInterface/ControllerInterface.h"
 
-namespace ciface
-{
-namespace Pipes
+namespace ciface::Pipes
 {
 // To create a piped controller input, create a named pipe in the
 // Pipes directory and write commands out to it. Commands are separated
@@ -24,42 +21,40 @@ namespace Pipes
 // SET {L, R} [0, 1]
 // SET {MAIN, C} [0, 1] [0, 1]
 
-void Init(std::vector<Core::Device*>& devices);
+std::unique_ptr<ciface::InputBackend> CreateInputBackend(ControllerInterface* controller_interface);
 
 class PipeDevice : public Core::Device
 {
 public:
-	PipeDevice(int fd, const std::string& name, int id);
-	~PipeDevice();
+  PipeDevice(int fd, const std::string& name);
+  ~PipeDevice();
 
-	void UpdateInput() override;
-	std::string GetName() const override { return m_name; }
-	int GetId() const override { return m_id; }
-	std::string GetSource() const override { return "Pipe"; }
+  Core::DeviceRemoval UpdateInput() override;
+  std::string GetName() const override { return m_name; }
+  std::string GetSource() const override { return "Pipe"; }
 
 private:
-	class PipeInput : public Input
-	{
-	public:
-		PipeInput(const std::string& name) : m_name(name), m_state(0.0) {}
-		std::string GetName() const override { return m_name; }
-		ControlState GetState() const override { return m_state; }
-		void SetState(ControlState state) { m_state = state; }
-	private:
-		const std::string m_name;
-		ControlState m_state;
-	};
+  class PipeInput : public Input
+  {
+  public:
+    PipeInput(const std::string& name) : m_name(name), m_state(0.0) {}
+    std::string GetName() const override { return m_name; }
+    ControlState GetState() const override { return m_state; }
+    void SetState(ControlState state) { m_state = state; }
 
-	void AddAxis(const std::string& name, double value);
-	void ParseCommand(const std::string& command);
-	void SetAxis(const std::string& entry, double value);
+  private:
+    const std::string m_name;
+    ControlState m_state;
+  };
 
-	const int m_fd;
-	const std::string m_name;
-	const int m_id;
-	std::string m_buf;
-	std::map<std::string, PipeInput*> m_buttons;
-	std::map<std::string, PipeInput*> m_axes;
+  void AddAxis(const std::string& name, double value);
+  void ParseCommand(const std::string& command);
+  void SetAxis(const std::string& entry, double value);
+
+  const int m_fd;
+  const std::string m_name;
+  std::string m_buf;
+  std::map<std::string, PipeInput*> m_buttons;
+  std::map<std::string, PipeInput*> m_axes;
 };
-}
-}
+}  // namespace ciface::Pipes
