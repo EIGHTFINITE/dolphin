@@ -1,4 +1,3 @@
-TITLES = https://www.gametdb.com (type: Wii language: PT_unique version: 20250826093628)
 R42P69 = Os SIMS 2: Naufragos
 R43P69 = EA Sports Active
 R4PP69 = Os SIMS 2: Animais de Estimação
@@ -33,7 +32,6 @@ RQXP70 = Asterix Jogos Olímpicos
 RT3P54 = Rockstar Games Presents: Table Tennis
 RU5P4Q = A Princesa e o Sapo
 RW3P4Q = Piratas das Caraibas: Nos confins do Mundo
-RWAP78 = WALL•E
 RWSP8P = Mario & Sonic nos Jogos Olímpicos
 RYBP69 = Boom Blox: Smash Party
 RZRPGT = Destiny Of Zorro
