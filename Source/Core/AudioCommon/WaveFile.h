@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 // ---------------------------------------------------------------------------------
 // Class: WaveFileWriter
@@ -16,32 +15,43 @@
 
 #include <array>
 #include <string>
-#include "Common/CommonTypes.h"
-#include "Common/FileUtil.h"
-#include "Common/NonCopyable.h"
 
-class WaveFileWriter : NonCopyable
+#include "Common/CommonTypes.h"
+#include "Common/IOFile.h"
+
+class WaveFileWriter
 {
 public:
-	WaveFileWriter();
-	~WaveFileWriter();
+  WaveFileWriter();
+  ~WaveFileWriter();
 
-	bool Start(const std::string& filename, unsigned int HLESampleRate);
-	void Stop();
+  WaveFileWriter(const WaveFileWriter&) = delete;
+  WaveFileWriter& operator=(const WaveFileWriter&) = delete;
+  WaveFileWriter(WaveFileWriter&&) = delete;
+  WaveFileWriter& operator=(WaveFileWriter&&) = delete;
 
-	void SetSkipSilence(bool skip) { skip_silence = skip; }
+  bool Start(const std::string& filename, u32 sample_rate_divisor);
+  void Stop();
 
-	void AddStereoSamples(const short *sample_data, u32 count);
-	void AddStereoSamplesBE(const short *sample_data, u32 count);  // big endian
-	u32 GetAudioSize() const { return audio_size; }
+  void SetSkipSilence(bool skip) { m_skip_silence = skip; }
+  // big endian
+  void AddStereoSamplesBE(const short* sample_data, u32 count, u32 sample_rate_divisor,
+                          int l_volume, int r_volume);
+  u32 GetAudioSize() const { return m_audio_size; }
 
 private:
-	static constexpr size_t BUFFER_SIZE = 32 * 1024;
+  static constexpr size_t BUFFER_SIZE = 32 * 1024;
 
-	File::IOFile file;
-	bool skip_silence = false;
-	u32 audio_size = 0;
-	std::array<short, BUFFER_SIZE> conv_buffer{};
-	void Write(u32 value);
-	void Write4(const char* ptr);
+  void Write(u32 value);
+  void Write4(const char* ptr);
+
+  File::IOFile m_file;
+  std::string m_basename;
+  u32 m_file_index = 0;
+  u32 m_audio_size = 0;
+
+  u32 m_current_sample_rate_divisor;
+  std::array<short, BUFFER_SIZE> m_conv_buffer{};
+
+  bool m_skip_silence = false;
 };

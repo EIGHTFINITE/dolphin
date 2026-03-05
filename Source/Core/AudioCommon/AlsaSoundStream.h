@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -20,47 +19,44 @@ class AlsaSound final : public SoundStream
 {
 #if defined(HAVE_ALSA) && HAVE_ALSA
 public:
-	AlsaSound();
+  AlsaSound();
+  ~AlsaSound() override;
 
-	bool Start() override;
-	void SoundLoop() override;
-	void Stop() override;
-	void Update() override;
-	void Clear(bool) override;
+  bool Init() override;
+  bool SetRunning(bool running) override;
 
-	static bool isValid()
-	{
-		return true;
-	}
+  static bool IsValid() { return true; }
 
 private:
-	// maximum number of frames the buffer can hold
-	static constexpr size_t BUFFER_SIZE_MAX = 8192;
+  void SoundLoop();
 
-	// minimum number of frames to deliver in one transfer
-	static constexpr u32 FRAME_COUNT_MIN = 256;
+  // maximum number of frames the buffer can hold
+  static constexpr size_t BUFFER_SIZE_MAX = 8192;
 
-	// number of channels per frame
-	static constexpr u32 CHANNEL_COUNT = 2;
+  // minimum number of frames to deliver in one transfer
+  static constexpr u32 FRAME_COUNT_MIN = 256;
 
-	enum class ALSAThreadStatus
-	{
-		RUNNING,
-		PAUSED,
-		STOPPING,
-		STOPPED,
-	};
+  // number of channels per frame
+  static constexpr u32 CHANNEL_COUNT = 2;
 
-	bool AlsaInit();
-	void AlsaShutdown();
+  enum class ALSAThreadStatus
+  {
+    RUNNING,
+    PAUSED,
+    STOPPING,
+    STOPPED,
+  };
 
-	s16 mix_buffer[BUFFER_SIZE_MAX * CHANNEL_COUNT];
-	std::thread thread;
-	std::atomic<ALSAThreadStatus> m_thread_status;
-	std::condition_variable cv;
-	std::mutex cv_m;
+  bool AlsaInit();
+  void AlsaShutdown();
 
-	snd_pcm_t *handle;
-	unsigned int frames_to_deliver;
+  s16 mix_buffer[BUFFER_SIZE_MAX * CHANNEL_COUNT];
+  std::thread thread;
+  std::atomic<ALSAThreadStatus> m_thread_status;
+  std::condition_variable cv;
+  std::mutex cv_m;
+
+  snd_pcm_t* handle;
+  unsigned int frames_to_deliver;
 #endif
 };
