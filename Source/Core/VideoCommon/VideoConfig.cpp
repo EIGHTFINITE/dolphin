@@ -1,329 +1,404 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "VideoCommon/VideoConfig.h"
 
 #include <algorithm>
-#include <cmath>
+#include <optional>
 
+#include "Common/CPUDetect.h"
 #include "Common/CommonTypes.h"
-#include "Common/FileUtil.h"
-#include "Common/IniFile.h"
-#include "Common/StringUtil.h"
+#include "Common/Contains.h"
+
+#include "Core/CPUThreadConfigCallback.h"
+#include "Core/Config/GraphicsSettings.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
 #include "Core/Movie.h"
+#include "Core/System.h"
+
+#include "VideoCommon/AbstractGfx.h"
+#include "VideoCommon/BPFunctions.h"
+#include "VideoCommon/BPMemory.h"
+#include "VideoCommon/DriverDetails.h"
+#include "VideoCommon/Fifo.h"
+#include "VideoCommon/FramebufferManager.h"
+#include "VideoCommon/FreeLookCamera.h"
+#include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/OnScreenDisplay.h"
-#include "VideoCommon/VideoCommon.h"
-#include "VideoCommon/VideoConfig.h"
+#include "VideoCommon/PixelShaderManager.h"
+#include "VideoCommon/ShaderGenCommon.h"
+#include "VideoCommon/TextureCacheBase.h"
+#include "VideoCommon/VertexManagerBase.h"
+#include "VideoCommon/XFMemory.h"
 
 VideoConfig g_Config;
 VideoConfig g_ActiveConfig;
+BackendInfo g_backend_info;
+static std::optional<CPUThreadConfigCallback::ConfigChangedCallbackID>
+    s_config_changed_callback_id = std::nullopt;
+static Common::EventHook s_check_config_event;
+
+static bool IsVSyncActive(bool enabled)
+{
+  // Vsync is disabled when the throttler is disabled by the tab key.
+  return enabled && !Core::GetIsThrottlerTempDisabled() &&
+         Config::Get(Config::MAIN_EMULATION_SPEED) == 1.0;
+}
 
 void UpdateActiveConfig()
 {
-	if (Movie::IsPlayingInput() && Movie::IsConfigSaved())
-		Movie::SetGraphicsConfig();
-	g_ActiveConfig = g_Config;
+  g_ActiveConfig = g_Config;
+  g_ActiveConfig.bVSyncActive = IsVSyncActive(g_ActiveConfig.bVSync);
 }
 
-VideoConfig::VideoConfig()
+void VideoConfig::Refresh()
 {
-	bRunning = false;
+  if (!s_config_changed_callback_id.has_value())
+  {
+    // There was a race condition between the video thread and the host thread here, if
+    // corrections need to be made by VerifyValidity(). Briefly, the config will contain
+    // invalid values. Instead, pause the video thread first, update the config and correct
+    // it, then resume emulation, after which the video thread will detect the config has
+    // changed and act accordingly.
+    const auto config_changed_callback = [] {
+      auto& system = Core::System::GetInstance();
 
-	// Exclusive fullscreen flags
-	bFullscreen = false;
-	bExclusiveMode = false;
+      const bool lock_gpu_thread = Core::IsRunning(system);
+      if (lock_gpu_thread)
+        system.GetFifo().PauseAndLock();
 
-	// Needed for the first frame, I think
-	fAspectRatioHackW = 1;
-	fAspectRatioHackH = 1;
+      g_Config.Refresh();
+      g_Config.VerifyValidity();
 
-	// disable all features by default
-	backend_info.APIType = API_NONE;
-	backend_info.bSupportsExclusiveFullscreen = false;
-}
+      if (lock_gpu_thread)
+        system.GetFifo().RestoreState(true);
+    };
 
-void VideoConfig::Load(const std::string& ini_file)
-{
-	IniFile iniFile;
-	iniFile.Load(ini_file);
+    s_config_changed_callback_id =
+        CPUThreadConfigCallback::AddConfigChangedCallback(config_changed_callback);
+  }
 
-	IniFile::Section* hardware = iniFile.GetOrCreateSection("Hardware");
-	hardware->Get("VSync", &bVSync, 0);
-	hardware->Get("Adapter", &iAdapter, 0);
+  bVSync = Config::Get(Config::GFX_VSYNC);
+  iAdapter = Config::Get(Config::GFX_ADAPTER);
+  iManuallyUploadBuffers = Config::Get(Config::GFX_MTL_MANUALLY_UPLOAD_BUFFERS);
+  iUsePresentDrawable = Config::Get(Config::GFX_MTL_USE_PRESENT_DRAWABLE);
 
-	IniFile::Section* settings = iniFile.GetOrCreateSection("Settings");
-	settings->Get("wideScreenHack", &bWidescreenHack, false);
-	settings->Get("AspectRatio", &iAspectRatio, (int)ASPECT_AUTO);
-	settings->Get("Crop", &bCrop, false);
-	settings->Get("UseXFB", &bUseXFB, 0);
-	settings->Get("UseRealXFB", &bUseRealXFB, 0);
-	settings->Get("SafeTextureCacheColorSamples", &iSafeTextureCache_ColorSamples, 128);
-	settings->Get("ShowFPS", &bShowFPS, false);
-	settings->Get("LogRenderTimeToFile", &bLogRenderTimeToFile, false);
-	settings->Get("OverlayStats", &bOverlayStats, false);
-	settings->Get("OverlayProjStats", &bOverlayProjStats, false);
-	settings->Get("DumpTextures", &bDumpTextures, 0);
-	settings->Get("HiresTextures", &bHiresTextures, 0);
-	settings->Get("ConvertHiresTextures", &bConvertHiresTextures, 0);
-	settings->Get("CacheHiresTextures", &bCacheHiresTextures, 0);
-	settings->Get("DumpEFBTarget", &bDumpEFBTarget, 0);
-	settings->Get("FreeLook", &bFreeLook, 0);
-	settings->Get("UseFFV1", &bUseFFV1, 0);
-	settings->Get("EnablePixelLighting", &bEnablePixelLighting, 0);
-	settings->Get("FastDepthCalc", &bFastDepthCalc, true);
-	settings->Get("MSAA", &iMultisamples, 1);
-	settings->Get("SSAA", &bSSAA, false);
-	settings->Get("EFBScale", &iEFBScale, (int)SCALE_1X); // native
-	settings->Get("TexFmtOverlayEnable", &bTexFmtOverlayEnable, 0);
-	settings->Get("TexFmtOverlayCenter", &bTexFmtOverlayCenter, 0);
-	settings->Get("WireFrame", &bWireFrame, 0);
-	settings->Get("DisableFog", &bDisableFog, 0);
-	settings->Get("EnableShaderDebugging", &bEnableShaderDebugging, false);
-	settings->Get("BorderlessFullscreen", &bBorderlessFullscreen, false);
+  bWidescreenHack = Config::Get(Config::GFX_WIDESCREEN_HACK);
+  aspect_mode = Config::Get(Config::GFX_ASPECT_RATIO);
+  custom_aspect_width = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH);
+  custom_aspect_height = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT);
+  suggested_aspect_mode = Config::Get(Config::GFX_SUGGESTED_ASPECT_RATIO);
+  widescreen_heuristic_transition_threshold =
+      Config::Get(Config::GFX_WIDESCREEN_HEURISTIC_TRANSITION_THRESHOLD);
+  widescreen_heuristic_aspect_ratio_slop =
+      Config::Get(Config::GFX_WIDESCREEN_HEURISTIC_ASPECT_RATIO_SLOP);
+  widescreen_heuristic_standard_ratio =
+      Config::Get(Config::GFX_WIDESCREEN_HEURISTIC_STANDARD_RATIO);
+  widescreen_heuristic_widescreen_ratio =
+      Config::Get(Config::GFX_WIDESCREEN_HEURISTIC_WIDESCREEN_RATIO);
+  bCrop = Config::Get(Config::GFX_CROP);
+  iSafeTextureCache_ColorSamples = Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
+  bShowFPS = Config::Get(Config::GFX_SHOW_FPS);
+  bShowFTimes = Config::Get(Config::GFX_SHOW_FTIMES);
+  bShowVPS = Config::Get(Config::GFX_SHOW_VPS);
+  bShowVTimes = Config::Get(Config::GFX_SHOW_VTIMES);
+  bShowGraphs = Config::Get(Config::GFX_SHOW_GRAPHS);
+  bShowSpeed = Config::Get(Config::GFX_SHOW_SPEED);
+  bShowSpeedColors = Config::Get(Config::GFX_SHOW_SPEED_COLORS);
+  iPerfSampleUSec = Config::Get(Config::GFX_PERF_SAMP_WINDOW) * 1000;
+  bLogRenderTimeToFile = Config::Get(Config::GFX_LOG_RENDER_TIME_TO_FILE);
+  bOverlayStats = Config::Get(Config::GFX_OVERLAY_STATS);
+  bOverlayProjStats = Config::Get(Config::GFX_OVERLAY_PROJ_STATS);
+  bOverlayScissorStats = Config::Get(Config::GFX_OVERLAY_SCISSOR_STATS);
+  bDumpTextures = Config::Get(Config::GFX_DUMP_TEXTURES);
+  bDumpMipmapTextures = Config::Get(Config::GFX_DUMP_MIP_TEXTURES);
+  bDumpBaseTextures = Config::Get(Config::GFX_DUMP_BASE_TEXTURES);
+  bHiresTextures = Config::Get(Config::GFX_HIRES_TEXTURES);
+  bCacheHiresTextures = Config::Get(Config::GFX_CACHE_HIRES_TEXTURES);
+  bDumpEFBTarget = Config::Get(Config::GFX_DUMP_EFB_TARGET);
+  bDumpXFBTarget = Config::Get(Config::GFX_DUMP_XFB_TARGET);
+  bEnableGPUTextureDecoding = Config::Get(Config::GFX_ENABLE_GPU_TEXTURE_DECODING);
+  bPreferVSForLinePointExpansion = Config::Get(Config::GFX_PREFER_VS_FOR_LINE_POINT_EXPANSION);
+  bEnablePixelLighting = Config::Get(Config::GFX_ENABLE_PIXEL_LIGHTING);
+  bFastDepthCalc = Config::Get(Config::GFX_FAST_DEPTH_CALC);
+  iMultisamples = Config::Get(Config::GFX_MSAA);
+  bSSAA = Config::Get(Config::GFX_SSAA);
+  iEFBScale = Config::Get(Config::GFX_EFB_SCALE);
+  bTexFmtOverlayEnable = Config::Get(Config::GFX_TEXFMT_OVERLAY_ENABLE);
+  bTexFmtOverlayCenter = Config::Get(Config::GFX_TEXFMT_OVERLAY_CENTER);
+  bWireFrame = Config::Get(Config::GFX_ENABLE_WIREFRAME);
+  bDisableFog = Config::Get(Config::GFX_DISABLE_FOG);
+  bBorderlessFullscreen = Config::Get(Config::GFX_BORDERLESS_FULLSCREEN);
+  bEnableValidationLayer = Config::Get(Config::GFX_ENABLE_VALIDATION_LAYER);
+  bBackendMultithreading = Config::Get(Config::GFX_BACKEND_MULTITHREADING);
+  iCommandBufferExecuteInterval = Config::Get(Config::GFX_COMMAND_BUFFER_EXECUTE_INTERVAL);
+  bShaderCache = Config::Get(Config::GFX_SHADER_CACHE);
+  bWaitForShadersBeforeStarting = Config::Get(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING);
+  iShaderCompilationMode = Config::Get(Config::GFX_SHADER_COMPILATION_MODE);
+  iShaderCompilerThreads = Config::Get(Config::GFX_SHADER_COMPILER_THREADS);
+  iShaderPrecompilerThreads = Config::Get(Config::GFX_SHADER_PRECOMPILER_THREADS);
+  bCPUCull = Config::Get(Config::GFX_CPU_CULL);
 
-	settings->Get("SWZComploc", &bZComploc, true);
-	settings->Get("SWZFreeze", &bZFreeze, true);
-	settings->Get("SWDumpObjects", &bDumpObjects, false);
-	settings->Get("SWDumpTevStages", &bDumpTevStages, false);
-	settings->Get("SWDumpTevTexFetches", &bDumpTevTextureFetches, false);
-	settings->Get("SWDrawStart", &drawStart, 0);
-	settings->Get("SWDrawEnd", &drawEnd, 100000);
+  texture_filtering_mode = Config::Get(Config::GFX_ENHANCE_FORCE_TEXTURE_FILTERING);
+  iMaxAnisotropy = Config::Get(Config::GFX_ENHANCE_MAX_ANISOTROPY);
+  output_resampling_mode = Config::Get(Config::GFX_ENHANCE_OUTPUT_RESAMPLING);
+  sPostProcessingShader = Config::Get(Config::GFX_ENHANCE_POST_SHADER);
+  bForceTrueColor = Config::Get(Config::GFX_ENHANCE_FORCE_TRUE_COLOR);
+  bDisableCopyFilter = Config::Get(Config::GFX_ENHANCE_DISABLE_COPY_FILTER);
+  bArbitraryMipmapDetection = Config::Get(Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION);
+  fArbitraryMipmapDetectionThreshold =
+      Config::Get(Config::GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION_THRESHOLD);
+  bHDR = Config::Get(Config::GFX_ENHANCE_HDR_OUTPUT);
 
+  color_correction.bCorrectColorSpace = Config::Get(Config::GFX_CC_CORRECT_COLOR_SPACE);
+  color_correction.game_color_space = Config::Get(Config::GFX_CC_GAME_COLOR_SPACE);
+  color_correction.bCorrectGamma = Config::Get(Config::GFX_CC_CORRECT_GAMMA);
+  color_correction.fGameGamma = Config::Get(Config::GFX_CC_GAME_GAMMA);
+  color_correction.bSDRDisplayGammaSRGB = Config::Get(Config::GFX_CC_SDR_DISPLAY_GAMMA_SRGB);
+  color_correction.fSDRDisplayCustomGamma = Config::Get(Config::GFX_CC_SDR_DISPLAY_CUSTOM_GAMMA);
+  color_correction.fHDRPaperWhiteNits = Config::Get(Config::GFX_CC_HDR_PAPER_WHITE_NITS);
 
-	IniFile::Section* enhancements = iniFile.GetOrCreateSection("Enhancements");
-	enhancements->Get("ForceFiltering", &bForceFiltering, 0);
-	enhancements->Get("MaxAnisotropy", &iMaxAnisotropy, 0);  // NOTE - this is x in (1 << x)
-	enhancements->Get("PostProcessingShader", &sPostProcessingShader, "");
+  stereo_mode = Config::Get(Config::GFX_STEREO_MODE);
+  stereo_per_eye_resolution_full = Config::Get(Config::GFX_STEREO_PER_EYE_RESOLUTION_FULL);
+  stereo_depth = Config::Get(Config::GFX_STEREO_DEPTH) *
+                 Config::Get(Config::GFX_STEREO_DEPTH_PERCENTAGE) * 0.00001f;
+  stereo_convergence = Config::Get(Config::GFX_STEREO_CONVERGENCE) *
+                       Config::Get(Config::GFX_STEREO_CONVERGENCE_PERCENTAGE) * 0.01f;
+  bStereoSwapEyes = Config::Get(Config::GFX_STEREO_SWAP_EYES);
+  bStereoEFBMonoDepth = Config::Get(Config::GFX_STEREO_EFB_MONO_DEPTH);
 
-	IniFile::Section* stereoscopy = iniFile.GetOrCreateSection("Stereoscopy");
-	stereoscopy->Get("StereoMode", &iStereoMode, 0);
-	stereoscopy->Get("StereoDepth", &iStereoDepth, 20);
-	stereoscopy->Get("StereoConvergencePercentage", &iStereoConvergencePercentage, 100);
-	stereoscopy->Get("StereoSwapEyes", &bStereoSwapEyes, false);
+  bEFBAccessEnable = Config::Get(Config::GFX_HACK_EFB_ACCESS_ENABLE);
+  bEFBAccessDeferInvalidation = Config::Get(Config::GFX_HACK_EFB_DEFER_INVALIDATION);
+  bBBoxEnable = Config::Get(Config::GFX_HACK_BBOX_ENABLE);
+  bSkipEFBCopyToRam = Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM);
+  bSkipXFBCopyToRam = Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM);
+  bDisableCopyToVRAM = Config::Get(Config::GFX_HACK_DISABLE_COPY_TO_VRAM);
+  bDeferEFBCopies = Config::Get(Config::GFX_HACK_DEFER_EFB_COPIES);
+  bImmediateXFB = Config::Get(Config::GFX_HACK_IMMEDIATE_XFB);
+  bVISkip = Config::Get(Config::GFX_HACK_VI_SKIP);
+  bSkipPresentingDuplicateXFBs = bVISkip || Config::Get(Config::GFX_HACK_SKIP_DUPLICATE_XFBS);
+  bCopyEFBScaled = Config::Get(Config::GFX_HACK_COPY_EFB_SCALED);
+  bEFBEmulateFormatChanges = Config::Get(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES);
+  bVertexRounding = Config::Get(Config::GFX_HACK_VERTEX_ROUNDING);
+  iEFBAccessTileSize = Config::Get(Config::GFX_HACK_EFB_ACCESS_TILE_SIZE);
+  iMissingColorValue = Config::Get(Config::GFX_HACK_MISSING_COLOR_VALUE);
+  bFastTextureSampling = Config::Get(Config::GFX_HACK_FAST_TEXTURE_SAMPLING);
+#ifdef __APPLE__
+  bNoMipmapping = Config::Get(Config::GFX_HACK_NO_MIPMAPPING);
+#endif
 
-	IniFile::Section* hacks = iniFile.GetOrCreateSection("Hacks");
-	hacks->Get("EFBAccessEnable", &bEFBAccessEnable, true);
-	hacks->Get("BBoxEnable", &bBBoxEnable, false);
-	hacks->Get("ForceProgressive", &bForceProgressive, true);
-	hacks->Get("EFBToTextureEnable", &bSkipEFBCopyToRam, true);
-	hacks->Get("EFBScaledCopy", &bCopyEFBScaled, true);
-	hacks->Get("EFBEmulateFormatChanges", &bEFBEmulateFormatChanges, false);
+  bPerfQueriesEnable = Config::Get(Config::GFX_PERF_QUERIES_ENABLE);
 
-	// hacks which are disabled by default
-	iPhackvalue[0] = 0;
-	bPerfQueriesEnable = false;
+  bGraphicMods = Config::Get(Config::GFX_MODS_ENABLE);
 
-	// Load common settings
-	iniFile.Load(File::GetUserPath(F_DOLPHINCONFIG_IDX));
-	IniFile::Section* interface = iniFile.GetOrCreateSection("Interface");
-	bool bTmp;
-	interface->Get("UsePanicHandlers", &bTmp, true);
-	SetEnableAlert(bTmp);
+  customDriverLibraryName = Config::Get(Config::GFX_DRIVER_LIB_NAME);
 
-	// Shader Debugging causes a huge slowdown and it's easy to forget about it
-	// since it's not exposed in the settings dialog. It's only used by
-	// developers, so displaying an obnoxious message avoids some confusion and
-	// is not too annoying/confusing for users.
-	//
-	// XXX(delroth): This is kind of a bad place to put this, but the current
-	// VideoCommon is a mess and we don't have a central initialization
-	// function to do these kind of checks. Instead, the init code is
-	// triplicated for each video backend.
-	if (bEnableShaderDebugging)
-		OSD::AddMessage("Warning: Shader Debugging is enabled, performance will suffer heavily", 15000);
-
-	VerifyValidity();
-}
-
-void VideoConfig::GameIniLoad()
-{
-	bool gfx_override_exists = false;
-
-	// XXX: Again, bad place to put OSD messages at (see delroth's comment above)
-	// XXX: This will add an OSD message for each projection hack value... meh
-#define CHECK_SETTING(section, key, var) do { \
-		decltype(var) temp = var; \
-		if (iniFile.GetIfExists(section, key, &var) && var != temp) { \
-			std::string msg = StringFromFormat("Note: Option \"%s\" is overridden by game ini.", key); \
-			OSD::AddMessage(msg, 7500); \
-			gfx_override_exists = true; \
-		} \
-	} while (0)
-
-	IniFile iniFile = SConfig::GetInstance().LoadGameIni();
-
-	CHECK_SETTING("Video_Hardware", "VSync", bVSync);
-
-	CHECK_SETTING("Video_Settings", "wideScreenHack", bWidescreenHack);
-	CHECK_SETTING("Video_Settings", "AspectRatio", iAspectRatio);
-	CHECK_SETTING("Video_Settings", "Crop", bCrop);
-	CHECK_SETTING("Video_Settings", "UseXFB", bUseXFB);
-	CHECK_SETTING("Video_Settings", "UseRealXFB", bUseRealXFB);
-	CHECK_SETTING("Video_Settings", "SafeTextureCacheColorSamples", iSafeTextureCache_ColorSamples);
-	CHECK_SETTING("Video_Settings", "HiresTextures", bHiresTextures);
-	CHECK_SETTING("Video_Settings", "ConvertHiresTextures", bConvertHiresTextures);
-	CHECK_SETTING("Video_Settings", "CacheHiresTextures", bCacheHiresTextures);
-	CHECK_SETTING("Video_Settings", "EnablePixelLighting", bEnablePixelLighting);
-	CHECK_SETTING("Video_Settings", "FastDepthCalc", bFastDepthCalc);
-	CHECK_SETTING("Video_Settings", "MSAA", iMultisamples);
-	CHECK_SETTING("Video_Settings", "SSAA", bSSAA);
-
-	int tmp = -9000;
-	CHECK_SETTING("Video_Settings", "EFBScale", tmp); // integral
-	if (tmp != -9000)
-	{
-		if (tmp != SCALE_FORCE_INTEGRAL)
-		{
-			iEFBScale = tmp;
-		}
-		else // Round down to multiple of native IR
-		{
-			switch (iEFBScale)
-			{
-			case SCALE_AUTO:
-				iEFBScale = SCALE_AUTO_INTEGRAL;
-				break;
-			case SCALE_1_5X:
-				iEFBScale = SCALE_1X;
-				break;
-			case SCALE_2_5X:
-				iEFBScale = SCALE_2X;
-				break;
-			default:
-				break;
-			}
-		}
-	}
-
-	CHECK_SETTING("Video_Settings", "DisableFog", bDisableFog);
-
-	CHECK_SETTING("Video_Enhancements", "ForceFiltering", bForceFiltering);
-	CHECK_SETTING("Video_Enhancements", "MaxAnisotropy", iMaxAnisotropy);  // NOTE - this is x in (1 << x)
-	CHECK_SETTING("Video_Enhancements", "PostProcessingShader", sPostProcessingShader);
-
-	// These are not overrides, they are per-game stereoscopy parameters, hence no warning
-	iniFile.GetIfExists("Video_Stereoscopy", "StereoConvergence", &iStereoConvergence, 20);
-	iniFile.GetIfExists("Video_Stereoscopy", "StereoEFBMonoDepth", &bStereoEFBMonoDepth, false);
-	iniFile.GetIfExists("Video_Stereoscopy", "StereoDepthPercentage", &iStereoDepthPercentage, 100);
-
-	CHECK_SETTING("Video_Stereoscopy", "StereoMode", iStereoMode);
-	CHECK_SETTING("Video_Stereoscopy", "StereoDepth", iStereoDepth);
-	CHECK_SETTING("Video_Stereoscopy", "StereoSwapEyes", bStereoSwapEyes);
-
-	CHECK_SETTING("Video_Hacks", "EFBAccessEnable", bEFBAccessEnable);
-	CHECK_SETTING("Video_Hacks", "BBoxEnable", bBBoxEnable);
-	CHECK_SETTING("Video_Hacks", "ForceProgressive", bForceProgressive);
-	CHECK_SETTING("Video_Hacks", "EFBToTextureEnable", bSkipEFBCopyToRam);
-	CHECK_SETTING("Video_Hacks", "EFBScaledCopy", bCopyEFBScaled);
-	CHECK_SETTING("Video_Hacks", "EFBEmulateFormatChanges", bEFBEmulateFormatChanges);
-
-	CHECK_SETTING("Video", "ProjectionHack", iPhackvalue[0]);
-	CHECK_SETTING("Video", "PH_SZNear", iPhackvalue[1]);
-	CHECK_SETTING("Video", "PH_SZFar", iPhackvalue[2]);
-	CHECK_SETTING("Video", "PH_ZNear", sPhackvalue[0]);
-	CHECK_SETTING("Video", "PH_ZFar", sPhackvalue[1]);
-	CHECK_SETTING("Video", "PerfQueriesEnable", bPerfQueriesEnable);
-
-	if (gfx_override_exists)
-		OSD::AddMessage("Warning: Opening the graphics configuration will reset settings and might cause issues!", 10000);
+  vertex_loader_type = Config::Get(Config::GFX_VERTEX_LOADER_TYPE);
 }
 
 void VideoConfig::VerifyValidity()
 {
-	// TODO: Check iMaxAnisotropy value
-	if (iAdapter < 0 || iAdapter > ((int)backend_info.Adapters.size() - 1))
-		iAdapter = 0;
+  // TODO: Check iMaxAnisotropy value
+  if (iAdapter < 0 || iAdapter > ((int)g_backend_info.Adapters.size() - 1))
+    iAdapter = 0;
 
-	if (std::find(backend_info.AAModes.begin(), backend_info.AAModes.end(), iMultisamples) == backend_info.AAModes.end())
-		iMultisamples = 1;
+  if (!Common::Contains(g_backend_info.AAModes, iMultisamples))
+    iMultisamples = 1;
 
-	if (iStereoMode > 0)
-	{
-		if (!backend_info.bSupportsGeometryShaders)
-		{
-			OSD::AddMessage("Stereoscopic 3D isn't supported by your GPU, support for OpenGL 3.2 is required.", 10000);
-			iStereoMode = 0;
-		}
-
-		if (bUseXFB && bUseRealXFB)
-		{
-			OSD::AddMessage("Stereoscopic 3D isn't supported with Real XFB, turning off stereoscopy.", 10000);
-			iStereoMode = 0;
-		}
-	}
+  if (stereo_mode != StereoMode::Off)
+  {
+    if (!g_backend_info.bSupportsGeometryShaders)
+    {
+      OSD::AddMessage(
+          "Stereoscopic 3D isn't supported by your GPU, support for OpenGL 3.2 is required.",
+          10000);
+      stereo_mode = StereoMode::Off;
+    }
+  }
 }
 
-void VideoConfig::Save(const std::string& ini_file)
+void VideoConfig::Init()
 {
-	IniFile iniFile;
-	iniFile.Load(ini_file);
-
-	IniFile::Section* hardware = iniFile.GetOrCreateSection("Hardware");
-	hardware->Set("VSync", bVSync);
-	hardware->Set("Adapter", iAdapter);
-
-	IniFile::Section* settings = iniFile.GetOrCreateSection("Settings");
-	settings->Set("AspectRatio", iAspectRatio);
-	settings->Set("Crop", bCrop);
-	settings->Set("wideScreenHack", bWidescreenHack);
-	settings->Set("UseXFB", bUseXFB);
-	settings->Set("UseRealXFB", bUseRealXFB);
-	settings->Set("SafeTextureCacheColorSamples", iSafeTextureCache_ColorSamples);
-	settings->Set("ShowFPS", bShowFPS);
-	settings->Set("LogRenderTimeToFile", bLogRenderTimeToFile);
-	settings->Set("OverlayStats", bOverlayStats);
-	settings->Set("OverlayProjStats", bOverlayProjStats);
-	settings->Set("DumpTextures", bDumpTextures);
-	settings->Set("HiresTextures", bHiresTextures);
-	settings->Set("ConvertHiresTextures", bConvertHiresTextures);
-	settings->Set("CacheHiresTextures", bCacheHiresTextures);
-	settings->Set("DumpEFBTarget", bDumpEFBTarget);
-	settings->Set("FreeLook", bFreeLook);
-	settings->Set("UseFFV1", bUseFFV1);
-	settings->Set("EnablePixelLighting", bEnablePixelLighting);
-	settings->Set("FastDepthCalc", bFastDepthCalc);
-	settings->Set("MSAA", iMultisamples);
-	settings->Set("SSAA", bSSAA);
-	settings->Set("EFBScale", iEFBScale);
-	settings->Set("TexFmtOverlayEnable", bTexFmtOverlayEnable);
-	settings->Set("TexFmtOverlayCenter", bTexFmtOverlayCenter);
-	settings->Set("Wireframe", bWireFrame);
-	settings->Set("DisableFog", bDisableFog);
-	settings->Set("EnableShaderDebugging", bEnableShaderDebugging);
-	settings->Set("BorderlessFullscreen", bBorderlessFullscreen);
-
-	settings->Set("SWZComploc", bZComploc);
-	settings->Set("SWZFreeze", bZFreeze);
-	settings->Set("SWDumpObjects", bDumpObjects);
-	settings->Set("SWDumpTevStages", bDumpTevStages);
-	settings->Set("SWDumpTevTexFetches", bDumpTevTextureFetches);
-	settings->Set("SWDrawStart", drawStart);
-	settings->Set("SWDrawEnd", drawEnd);
-
-	IniFile::Section* enhancements = iniFile.GetOrCreateSection("Enhancements");
-	enhancements->Set("ForceFiltering", bForceFiltering);
-	enhancements->Set("MaxAnisotropy", iMaxAnisotropy);
-	enhancements->Set("PostProcessingShader", sPostProcessingShader);
-
-	IniFile::Section* stereoscopy = iniFile.GetOrCreateSection("Stereoscopy");
-	stereoscopy->Set("StereoMode", iStereoMode);
-	stereoscopy->Set("StereoDepth", iStereoDepth);
-	stereoscopy->Set("StereoConvergencePercentage", iStereoConvergencePercentage);
-	stereoscopy->Set("StereoSwapEyes", bStereoSwapEyes);
-
-	IniFile::Section* hacks = iniFile.GetOrCreateSection("Hacks");
-	hacks->Set("EFBAccessEnable", bEFBAccessEnable);
-	hacks->Set("BBoxEnable", bBBoxEnable);
-	hacks->Set("ForceProgressive", bForceProgressive);
-	hacks->Set("EFBToTextureEnable", bSkipEFBCopyToRam);
-	hacks->Set("EFBScaledCopy", bCopyEFBScaled);
-	hacks->Set("EFBEmulateFormatChanges", bEFBEmulateFormatChanges);
-
-	iniFile.Save(ini_file);
+  s_check_config_event =
+      GetVideoEvents().after_frame_event.Register([](Core::System&) { CheckForConfigChanges(); });
 }
 
-bool VideoConfig::IsVSync()
+void VideoConfig::Shutdown()
 {
-	return bVSync && !Core::GetIsThrottlerTempDisabled();
+  s_check_config_event.reset();
+
+  if (!s_config_changed_callback_id.has_value())
+    return;
+
+  CPUThreadConfigCallback::RemoveConfigChangedCallback(*s_config_changed_callback_id);
+  s_config_changed_callback_id.reset();
+}
+
+bool VideoConfig::UsingUberShaders() const
+{
+  return iShaderCompilationMode == ShaderCompilationMode::SynchronousUberShaders ||
+         iShaderCompilationMode == ShaderCompilationMode::AsynchronousUberShaders;
+}
+
+static u32 GetNumAutoShaderCompilerThreads()
+{
+  // Automatic number.
+  return static_cast<u32>(std::clamp(cpu_info.num_cores - 3, 1, 4));
+}
+
+static u32 GetNumAutoShaderPreCompilerThreads()
+{
+  // Automatic number. We use clamp(cpus - 2, 1, infty) here.
+  // We chose this because we don't want to limit our speed-up
+  // and at the same time leave two logical cores for the dolphin UI and the rest of the OS.
+  return static_cast<u32>(std::max(cpu_info.num_cores - 2, 1));
+}
+
+u32 VideoConfig::GetShaderCompilerThreads() const
+{
+  if (!g_backend_info.bSupportsBackgroundCompiling)
+    return 0;
+
+  if (iShaderCompilerThreads >= 0)
+    return static_cast<u32>(iShaderCompilerThreads);
+  else
+    return GetNumAutoShaderCompilerThreads();
+}
+
+u32 VideoConfig::GetShaderPrecompilerThreads() const
+{
+  // When using background compilation, always keep the same thread count.
+  if (!bWaitForShadersBeforeStarting)
+    return GetShaderCompilerThreads();
+
+  if (!g_backend_info.bSupportsBackgroundCompiling)
+    return 0;
+
+  if (iShaderPrecompilerThreads >= 0)
+    return static_cast<u32>(iShaderPrecompilerThreads);
+  else if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_MULTITHREADED_SHADER_PRECOMPILATION))
+    return GetNumAutoShaderPreCompilerThreads();
+  else
+    return 1;
+}
+
+void CheckForConfigChanges()
+{
+  const ShaderHostConfig old_shader_host_config = ShaderHostConfig::GetCurrent();
+  const StereoMode old_stereo = g_ActiveConfig.stereo_mode;
+  const u32 old_multisamples = g_ActiveConfig.iMultisamples;
+  const auto old_anisotropy = g_ActiveConfig.iMaxAnisotropy;
+  const int old_efb_access_tile_size = g_ActiveConfig.iEFBAccessTileSize;
+  const auto old_texture_filtering_mode = g_ActiveConfig.texture_filtering_mode;
+  const bool old_vsync = g_ActiveConfig.bVSyncActive;
+  const bool old_bbox = g_ActiveConfig.bBBoxEnable;
+  const int old_efb_scale = g_ActiveConfig.iEFBScale;
+  const u32 old_game_mod_changes =
+      g_ActiveConfig.graphics_mod_config ? g_ActiveConfig.graphics_mod_config->GetChangeCount() : 0;
+  const bool old_graphics_mods_enabled = g_ActiveConfig.bGraphicMods;
+  const AspectMode old_aspect_mode = g_ActiveConfig.aspect_mode;
+  const AspectMode old_suggested_aspect_mode = g_ActiveConfig.suggested_aspect_mode;
+  const bool old_widescreen_hack = g_ActiveConfig.bWidescreenHack;
+  const auto old_post_processing_shader = g_ActiveConfig.sPostProcessingShader;
+  const auto old_hdr = g_ActiveConfig.bHDR;
+
+  UpdateActiveConfig();
+  g_vertex_manager->OnConfigChange();
+
+  g_freelook_camera.RefreshConfig();
+
+  if (g_ActiveConfig.bGraphicMods && !old_graphics_mods_enabled)
+  {
+    g_ActiveConfig.graphics_mod_config = GraphicsModGroupConfig(SConfig::GetInstance().GetGameID());
+    g_ActiveConfig.graphics_mod_config->Load();
+  }
+
+  if (g_ActiveConfig.graphics_mod_config &&
+      (old_game_mod_changes != g_ActiveConfig.graphics_mod_config->GetChangeCount()))
+  {
+    g_graphics_mod_manager->Load(*g_ActiveConfig.graphics_mod_config);
+  }
+
+  // Update texture cache settings with any changed options.
+  g_texture_cache->OnConfigChanged(g_ActiveConfig);
+
+  // EFB tile cache doesn't need to notify the backend.
+  if (old_efb_access_tile_size != g_ActiveConfig.iEFBAccessTileSize)
+    g_framebuffer_manager->SetEFBCacheTileSize(std::max(g_ActiveConfig.iEFBAccessTileSize, 0));
+
+  // Determine which (if any) settings have changed.
+  ShaderHostConfig new_host_config = ShaderHostConfig::GetCurrent();
+  u32 changed_bits = 0;
+  if (old_shader_host_config.bits != new_host_config.bits)
+    changed_bits |= CONFIG_CHANGE_BIT_HOST_CONFIG;
+  if (old_stereo != g_ActiveConfig.stereo_mode)
+    changed_bits |= CONFIG_CHANGE_BIT_STEREO_MODE;
+  if (old_multisamples != g_ActiveConfig.iMultisamples)
+    changed_bits |= CONFIG_CHANGE_BIT_MULTISAMPLES;
+  if (old_anisotropy != g_ActiveConfig.iMaxAnisotropy)
+    changed_bits |= CONFIG_CHANGE_BIT_ANISOTROPY;
+  if (old_texture_filtering_mode != g_ActiveConfig.texture_filtering_mode)
+    changed_bits |= CONFIG_CHANGE_BIT_FORCE_TEXTURE_FILTERING;
+  if (old_vsync != g_ActiveConfig.bVSyncActive)
+    changed_bits |= CONFIG_CHANGE_BIT_VSYNC;
+  if (old_bbox != g_ActiveConfig.bBBoxEnable)
+    changed_bits |= CONFIG_CHANGE_BIT_BBOX;
+  if (old_efb_scale != g_ActiveConfig.iEFBScale)
+    changed_bits |= CONFIG_CHANGE_BIT_TARGET_SIZE;
+  if (old_aspect_mode != g_ActiveConfig.aspect_mode)
+    changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
+  if (old_suggested_aspect_mode != g_ActiveConfig.suggested_aspect_mode)
+    changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
+  if (old_widescreen_hack != g_ActiveConfig.bWidescreenHack)
+    changed_bits |= CONFIG_CHANGE_BIT_ASPECT_RATIO;
+  if (old_post_processing_shader != g_ActiveConfig.sPostProcessingShader)
+    changed_bits |= CONFIG_CHANGE_BIT_POST_PROCESSING_SHADER;
+  if (old_hdr != g_ActiveConfig.bHDR)
+    changed_bits |= CONFIG_CHANGE_BIT_HDR;
+
+  // No changes?
+  if (changed_bits == 0)
+    return;
+
+  float old_scale = g_framebuffer_manager->GetEFBScale();
+
+  // Framebuffer changed?
+  if (changed_bits & (CONFIG_CHANGE_BIT_MULTISAMPLES | CONFIG_CHANGE_BIT_STEREO_MODE |
+                      CONFIG_CHANGE_BIT_TARGET_SIZE | CONFIG_CHANGE_BIT_HDR))
+  {
+    g_framebuffer_manager->RecreateEFBFramebuffer(g_ActiveConfig.iEFBScale);
+  }
+
+  if (old_scale != g_framebuffer_manager->GetEFBScale())
+  {
+    auto& system = Core::System::GetInstance();
+    auto& pixel_shader_manager = system.GetPixelShaderManager();
+    pixel_shader_manager.Dirty();
+  }
+
+  // Reload shaders if host config has changed.
+  if (changed_bits & (CONFIG_CHANGE_BIT_HOST_CONFIG | CONFIG_CHANGE_BIT_MULTISAMPLES))
+  {
+    OSD::AddMessage("Video config changed, reloading shaders.", OSD::Duration::NORMAL);
+    g_gfx->WaitForGPUIdle();
+    g_vertex_manager->InvalidatePipelineObject();
+    g_vertex_manager->NotifyCustomShaderCacheOfHostChange(new_host_config);
+    g_shader_cache->SetHostConfig(new_host_config);
+    g_shader_cache->Reload();
+    g_framebuffer_manager->RecompileShaders();
+  }
+
+  // Viewport and scissor rect have to be reset since they will be scaled differently.
+  if (changed_bits & CONFIG_CHANGE_BIT_TARGET_SIZE)
+  {
+    BPFunctions::SetScissorAndViewport(g_framebuffer_manager.get(), bpmem.scissorTL,
+                                       bpmem.scissorBR, bpmem.scissorOffset, xfmem.viewport);
+  }
+
+  // Notify all listeners
+  GetVideoEvents().config_changed_event.Trigger(changed_bits);
+
+  // TODO: Move everything else to the ConfigChanged event
 }

@@ -1,27 +1,42 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#ifdef __APPLE__
+// This define will silence all "OpenGL is deprecated, use Metal" warnings.
+#define GL_SILENCE_DEPRECATION 1
+
+#if defined(__APPLE__) && defined(__OBJC__)
 #import <AppKit/AppKit.h>
+#else
+struct NSOpenGLContext;
+struct NSOpenGLPixelFormat;
+struct NSView;
 #endif
 
-#include "Common/GL/GLInterfaceBase.h"
+#include "Common/GL/GLContext.h"
 
-class cInterfaceAGL : public cInterfaceBase
+class GLContextAGL final : public GLContext
 {
-private:
-	NSView* cocoaWin;
-	NSOpenGLContext* cocoaCtx;
 public:
-	void Swap() override;
-	bool Create(void* window_handle, bool core) override;
-	bool MakeCurrent() override;
-	bool ClearCurrent() override;
-	void Shutdown() override;
-	void Update() override;
-	void SwapInterval(int interval) override;
+  ~GLContextAGL() override;
 
+  bool IsHeadless() const override;
+
+  std::unique_ptr<GLContext> CreateSharedContext() override;
+
+  bool MakeCurrent() override;
+  bool ClearCurrent() override;
+
+  void Update() override;
+
+  void Swap() override;
+  void SwapInterval(int interval) override;
+
+protected:
+  bool Initialize(const WindowSystemInfo& wsi, bool stereo, bool core) override;
+
+  NSView* m_view = nullptr;
+  NSOpenGLContext* m_context = nullptr;
+  NSOpenGLPixelFormat* m_pixel_format = nullptr;
 };
