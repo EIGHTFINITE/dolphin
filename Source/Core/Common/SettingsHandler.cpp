@@ -1,127 +1,126 @@
 // Copyright 2012 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 // Thanks to Treeki for writing the original class - 29/01/2012
 
+#include "Common/SettingsHandler.h"
+
+#include <algorithm>
 #include <cstddef>
-#include <cstdio>
-#include <cstring>
 #include <ctime>
 #include <string>
 
-#ifdef _WIN32
-#include <mmsystem.h>
-#include <sys/timeb.h>
-#include <windows.h>
-#include "Common/CommonFuncs.h" // snprintf
-#endif
+#include <fmt/chrono.h>
 
 #include "Common/CommonTypes.h"
-#include "Common/SettingsHandler.h"
-#include "Common/Timer.h"
 
-SettingsHandler::SettingsHandler()
+namespace Common
 {
-	Reset();
+namespace
+{
+// Key used to encrypt/decrypt setting.txt contents
+constexpr u32 INITIAL_SEED = 0x73B5DBFA;
+}  // namespace
+
+SettingsWriter::SettingsWriter() : m_buffer{}, m_position{0}, m_key{INITIAL_SEED}
+{
 }
 
-const u8* SettingsHandler::GetData() const
+const SettingsBuffer& SettingsWriter::GetBytes() const
 {
-	return m_buffer;
+  return m_buffer;
 }
 
-const std::string SettingsHandler::GetValue(const std::string& key)
+std::string SettingsReader::GetValue(std::string_view key) const
 {
-	std::string delim = std::string("\r\n");
-	std::string toFind = delim + key + "=";
-	size_t found = decoded.find(toFind);
+  constexpr char delim[] = "\n";
+  std::string toFind = std::string(delim).append(key).append("=");
+  size_t found = m_decoded.find(toFind);
 
-	if (found != decoded.npos)
-	{
-		size_t delimFound = decoded.find(delim, found + toFind.length());
-		if (delimFound == decoded.npos)
-			delimFound = decoded.length() - 1;
-		return decoded.substr(found + toFind.length(), delimFound - (found + toFind.length()));
-	}
-	else
-	{
-		toFind = key + "=";
-		found = decoded.find(toFind);
-		if (found == 0)
-		{
-			size_t delimFound = decoded.find(delim, found + toFind.length());
-			if (delimFound == decoded.npos)
-				delimFound = decoded.length() - 1;
-			return decoded.substr(found + toFind.length(), delimFound - (found + toFind.length()));
-		}
-	}
+  if (found != std::string_view::npos)
+  {
+    size_t delimFound = m_decoded.find(delim, found + toFind.length());
+    if (delimFound == std::string_view::npos)
+      delimFound = m_decoded.length() - 1;
+    return m_decoded.substr(found + toFind.length(), delimFound - (found + toFind.length()));
+  }
+  else
+  {
+    toFind = std::string(key).append("=");
+    found = m_decoded.find(toFind);
+    if (found == 0)
+    {
+      size_t delimFound = m_decoded.find(delim, found + toFind.length());
+      if (delimFound == std::string_view::npos)
+        delimFound = m_decoded.length() - 1;
+      return m_decoded.substr(found + toFind.length(), delimFound - (found + toFind.length()));
+    }
+  }
 
-	return "";
+  return "";
 }
 
-void SettingsHandler::Decrypt()
+SettingsReader::SettingsReader(const SettingsBuffer& buffer) : m_decoded{""}
 {
-	const u8* str = m_buffer;
-	while (*str != 0)
-	{
-		if (m_position >= SETTINGS_SIZE)
-			return;
-		decoded.push_back((u8)(m_buffer[m_position] ^ m_key));
-		m_position++;
-		str++;
-		m_key = (m_key >> 31) | (m_key << 1);
-	}
+  u32 key = INITIAL_SEED;
+  for (u32 position = 0; position < buffer.size(); ++position)
+  {
+    m_decoded.push_back((u8)(buffer[position] ^ key));
+    key = (key >> 31) | (key << 1);
+  }
+
+  // The decoded data normally uses CRLF line endings, but occasionally
+  // (see the comment in WriteLine), lines can be separated by CRLFLF.
+  // To handle this, we remove every CR and treat LF as the line ending.
+  // (We ignore empty lines.)
+  std::erase(m_decoded, '\x0d');
 }
 
-void SettingsHandler::Reset()
+void SettingsWriter::AddSetting(std::string_view key, std::string_view value)
 {
-	decoded = "";
-	m_position = 0;
-	m_key = INITIAL_SEED;
-	memset(m_buffer, 0, SETTINGS_SIZE);
+  WriteLine(fmt::format("{}={}\r\n", key, value));
 }
 
-void SettingsHandler::AddSetting(const std::string& key, const std::string& value)
+void SettingsWriter::WriteLine(std::string_view str)
 {
-	for (const char& c : key)
-	{
-		WriteByte(c);
-	}
+  const u32 old_position = m_position;
+  const u32 old_key = m_key;
 
-	WriteByte('=');
+  // Encode and write the line
+  for (char c : str)
+    WriteByte(c);
 
-	for (const char& c : value)
-	{
-		WriteByte(c);
-	}
-
-	WriteByte(13);
-	WriteByte(10);
+  // If the encoded data contains a null byte, Nintendo's decoder will stop at that null byte
+  // instead of decoding all the data. To avoid this: If the data we just wrote contains
+  // a null byte, add an LF right before the line to prod the values into being different,
+  // just like Nintendo does. Due to the chosen key, LF itself never encodes into a null byte.
+  const auto begin = m_buffer.cbegin() + old_position;
+  const auto end = m_buffer.cbegin() + m_position;
+  if (std::find(begin, end, 0) != end)
+  {
+    m_key = old_key;
+    m_position = old_position;
+    WriteByte('\n');
+    WriteLine(str);
+  }
 }
 
-void SettingsHandler::WriteByte(u8 b)
+void SettingsWriter::WriteByte(u8 b)
 {
-	if (m_position >= SETTINGS_SIZE)
-		return;
+  if (m_position >= m_buffer.size())
+    return;
 
-	m_buffer[m_position] = b ^ m_key;
-	m_position++;
-	m_key = (m_key >> 31) | (m_key << 1);
+  m_buffer[m_position] = b ^ m_key;
+  m_position++;
+  m_key = (m_key >> 31) | (m_key << 1);
 }
 
-const std::string SettingsHandler::generateSerialNumber()
+std::string SettingsWriter::GenerateSerialNumber()
 {
-	time_t rawtime;
-	tm* timeinfo;
-	char buffer[12];
-	char serialNumber[12];
+  const std::time_t t = std::time(nullptr);
 
-	time(&rawtime);
-	timeinfo = localtime(&rawtime);
-	strftime(buffer, 11, "%j%H%M%S", timeinfo);
-
-	snprintf(serialNumber, 11, "%s%i", buffer, (Common::Timer::GetTimeMs() >> 1) & 0xF);
-	serialNumber[10] = 0;
-	return std::string(serialNumber);
+  // Must be 9 characters at most; otherwise the serial number will be rejected by SDK libraries,
+  // as there is a check to ensure the string length is strictly lower than 10.
+  return fmt::format("{:09}", t % 1000000000);
 }
+}  // namespace Common
