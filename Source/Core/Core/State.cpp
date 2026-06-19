@@ -15,6 +15,7 @@
 
 #include <fmt/chrono.h>
 #include <fmt/format.h>
+#include <fmt/std.h>
 
 #include <lz4.h>
 #include <lzo/lzo1x.h>
@@ -463,7 +464,7 @@ static void CompressAndDumpState(Core::System& system, const CompressAndDumpStat
   else
   {
     const std::filesystem::path temp_path(filename);
-    Core::DisplayMessage(fmt::format("Saved State to {}", temp_path.filename().string()), 2000);
+    Core::DisplayMessage(fmt::format("Saved State to {}", temp_path.filename()), 2000);
   }
 }
 
@@ -840,9 +841,8 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
   {
     if (loaded_successfully)
     {
-      std::filesystem::path temp_filename(std::move(filename));
-      Core::DisplayMessage(fmt::format("Loaded State from {}", temp_filename.filename().string()),
-                           2000);
+      const std::filesystem::path temp_filename(filename);
+      Core::DisplayMessage(fmt::format("Loaded State from {}", temp_filename.filename()), 2000);
       if (File::Exists(filename + ".dtm"))
       {
         movie.LoadInput(filename + ".dtm");
