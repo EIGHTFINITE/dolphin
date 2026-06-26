@@ -1,316 +1,133 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
+#include <mutex>
+#include <optional>
 #include <string>
-#include <vector>
+#include <string_view>
 
-#include "Common/IniFile.h"
-#include "Common/NonCopyable.h"
-#include "Common/SysConf.h"
-#include "Core/HW/EXI_Device.h"
-#include "Core/HW/SI_Device.h"
-#include "DiscIO/Volume.h"
+#include "Common/CommonTypes.h"
 
-// DSP Backend Types
-#define BACKEND_NULLSOUND   _trans("No audio output")
-#define BACKEND_ALSA        "ALSA"
-#define BACKEND_AOSOUND     "AOSound"
-#define BACKEND_COREAUDIO   "CoreAudio"
-#define BACKEND_OPENAL      "OpenAL"
-#define BACKEND_PULSEAUDIO  "Pulse"
-#define BACKEND_XAUDIO2     "XAudio2"
-#define BACKEND_OPENSLES    "OpenSLES"
-
-enum GPUDeterminismMode
+namespace Common
 {
-	GPU_DETERMINISM_AUTO,
-	GPU_DETERMINISM_NONE,
-	// This is currently the only mode.  There will probably be at least
-	// one more at some point.
-	GPU_DETERMINISM_FAKE_COMPLETION,
-};
+class IniFile;
+}
 
-struct SConfig : NonCopyable
+namespace Core
 {
-	// Wii Devices
-	bool m_WiiSDCard;
-	bool m_WiiKeyboard;
-	bool m_WiimoteContinuousScanning;
-	bool m_WiimoteEnableSpeaker;
+class CPUThreadGuard;
+class System;
+}  // namespace Core
 
-	// name of the last used filename
-	std::string m_LastFilename;
+namespace DiscIO
+{
+enum class Language;
+enum class Platform;
+enum class Region;
+struct Partition;
+class Volume;
+}  // namespace DiscIO
 
-	// ISO folder
-	std::vector<std::string> m_ISOFolder;
-	bool m_RecursiveISOFolder;
+namespace IOS::ES
+{
+class TMDReader;
+}  // namespace IOS::ES
 
-	// Settings
-	bool bEnableDebugging;
-	#ifdef USE_GDBSTUB
-	int iGDBPort;
-	#ifndef _WIN32
-	std::string gdb_socket;
-	#endif
-	#endif
-	bool bAutomaticStart;
-	bool bBootToPause;
+struct BootParameters;
 
-	int iCPUCore;
+static constexpr std::string_view DEFAULT_GAME_ID = "00000000";
 
-	// JIT (shared between JIT and JITIL)
-	bool bJITNoBlockCache, bJITNoBlockLinking;
-	bool bJITOff;
-	bool bJITLoadStoreOff, bJITLoadStorelXzOff, bJITLoadStorelwzOff, bJITLoadStorelbzxOff;
-	bool bJITLoadStoreFloatingOff;
-	bool bJITLoadStorePairedOff;
-	bool bJITFloatingPointOff;
-	bool bJITIntegerOff;
-	bool bJITPairedOff;
-	bool bJITSystemRegistersOff;
-	bool bJITBranchOff;
-	bool bJITILTimeProfiling;
-	bool bJITILOutputIR;
+struct SConfig
+{
+  // Settings
+  bool bBootToPause = false;
 
-	bool bFastmem;
-	bool bFPRF;
-	bool bAccurateNaNs;
+  bool bJITNoBlockCache = false;
+  bool bJITNoBlockLinking = false;
 
-	int iTimingVariance; // in milli secounds
-	bool bCPUThread;
-	bool bDSPThread;
-	bool bDSPHLE;
-	bool bSkipIdle;
-	bool bSyncGPUOnSkipIdleHack;
-	bool bNTSC;
-	bool bForceNTSCJ;
-	bool bHLE_BS2;
-	bool bEnableCheats;
-	bool bEnableMemcardSdWriting;
+  bool bCopyWiiSaveNetplay = true;
 
-	bool bDPL2Decoder;
-	int iLatency;
+  DiscIO::Region m_region;
 
-	bool bRunCompareServer;
-	bool bRunCompareClient;
+  // files
+  std::string m_strBootROM;
+  std::string m_strSRAM;
+  std::string m_debugger_game_id;
 
-	bool bMMU;
-	bool bDCBZOFF;
-	int iBBDumpPort;
-	bool bFastDiscSpeed;
+  // TODO: remove this as soon as the ticket view hack in IOS/ES/Views is dropped.
+  bool m_disc_booted_from_game_list = false;
 
-	bool bSyncGPU;
-	int iSyncGpuMaxDistance;
-	int iSyncGpuMinDistance;
-	float fSyncGpuOverclock;
+  const std::string GetGameID() const;
+  const std::string GetGameTDBID() const;
+  const std::string GetTitleName() const;
+  const std::string GetTitleDescription() const;
+  u64 GetTitleID() const;
+  u16 GetRevision() const;
+  void ResetRunningGameMetadata();
+  void SetRunningGameMetadata(const DiscIO::Volume& volume, const DiscIO::Partition& partition);
+  void SetRunningGameMetadata(const IOS::ES::TMDReader& tmd, DiscIO::Platform platform);
+  void SetRunningGameMetadata(const std::string& game_id);
 
-	int SelectedLanguage;
-	bool bOverrideGCLanguage;
+  // Triggered when Dolphin loads a title directly
+  // Reloads title-specific map files, patches, etc.
+  static void OnTitleDirectlyBooted(const Core::CPUThreadGuard& guard);
 
-	bool bWii;
+  // Direct title change from ES (Wii system)
+  // Wii titles will still hit OnTitleDirectlyBooted
+  // but GC titles will never see this call
+  static void OnESTitleChanged();
 
-	// Interface settings
-	bool bConfirmStop, bHideCursor, bAutoHideCursor, bUsePanicHandlers, bOnScreenDisplayMessages;
-	std::string theme_name;
+  void LoadDefaults();
+  static std::string MakeGameID(std::string_view file_name);
+  bool SetPathsAndGameMetadata(Core::System& system, const BootParameters& boot);
+  DiscIO::Language GetCurrentLanguage(bool wii) const;
+  DiscIO::Language GetLanguageAdjustedForRegion(bool wii, DiscIO::Region region) const;
+  std::string GetGameTDBImageRegionCode(bool wii, DiscIO::Region region) const;
 
-	// Display settings
-	std::string strFullscreenResolution;
-	int iRenderWindowXPos, iRenderWindowYPos;
-	int iRenderWindowWidth, iRenderWindowHeight;
-	bool bRenderWindowAutoSize, bKeepWindowOnTop;
-	bool bFullscreen, bRenderToMain;
-	bool bProgressive, bPAL60;
-	bool bDisableScreenSaver;
+  Common::IniFile LoadDefaultGameIni() const;
+  Common::IniFile LoadLocalGameIni() const;
+  Common::IniFile LoadGameIni() const;
 
-	int iPosX, iPosY, iWidth, iHeight;
+  static Common::IniFile LoadDefaultGameIni(std::string_view id, std::optional<u16> revision);
+  static Common::IniFile LoadLocalGameIni(std::string_view id, std::optional<u16> revision);
+  static Common::IniFile LoadGameIni(std::string_view id, std::optional<u16> revision);
 
-	// Analytics settings.
-	std::string m_analytics_id;
-	bool m_analytics_enabled;
-	bool m_analytics_permission_asked;
+  SConfig(const SConfig&) = delete;
+  SConfig& operator=(const SConfig&) = delete;
+  SConfig(SConfig&&) = delete;
+  SConfig& operator=(SConfig&&) = delete;
 
-	// Fifo Player related settings
-	bool bLoopFifoReplay;
+  // Save settings
+  void SaveSettings();
 
-	enum EBootBS2
-	{
-		BOOT_DEFAULT,
-		BOOT_BS2_JAP,
-		BOOT_BS2_USA,
-		BOOT_BS2_EUR,
-	};
+  // Load settings
+  void LoadSettings();
 
-	enum EBootType
-	{
-		BOOT_ISO,
-		BOOT_ELF,
-		BOOT_DOL,
-		BOOT_WII_NAND,
-		BOOT_BS2,
-		BOOT_DFF
-	};
-	EBootType m_BootType;
+  static void ResetAllSettings();
 
-	std::string m_strVideoBackend;
-	std::string m_strGPUDeterminismMode;
-
-	// set based on the string version
-	GPUDeterminismMode m_GPUDeterminismMode;
-
-	// files
-	std::string m_strFilename;
-	std::string m_strBootROM;
-	std::string m_strSRAM;
-	std::string m_strDefaultISO;
-	std::string m_strDVDRoot;
-	std::string m_strApploader;
-	std::string m_strUniqueID;
-	std::string m_strName;
-	u16 m_revision;
-
-	std::string m_perfDir;
-
-	void LoadDefaults();
-	bool AutoSetup(EBootBS2 _BootBS2);
-	const std::string &GetUniqueID() const { return m_strUniqueID; }
-	void CheckMemcardPath(std::string& memcardPath, const std::string& gameRegion, bool isSlotA);
-	DiscIO::IVolume::ELanguage GetCurrentLanguage(bool wii) const;
-
-	IniFile LoadDefaultGameIni() const;
-	IniFile LoadLocalGameIni() const;
-	IniFile LoadGameIni() const;
-
-	static IniFile LoadDefaultGameIni(const std::string& id, u16 revision);
-	static IniFile LoadLocalGameIni(const std::string& id, u16 revision);
-	static IniFile LoadGameIni(const std::string& id, u16 revision);
-
-	static std::vector<std::string> GetGameIniFilenames(const std::string& id, u16 revision);
-
-	std::string m_NANDPath;
-
-	std::string m_strMemoryCardA;
-	std::string m_strMemoryCardB;
-	std::string m_strGbaCartA;
-	std::string m_strGbaCartB;
-	TEXIDevices m_EXIDevice[3];
-	SIDevices m_SIDevice[4];
-	std::string m_bba_mac;
-
-	// interface language
-	int m_InterfaceLanguage;
-	float m_EmulationSpeed;
-	bool m_OCEnable;
-	float m_OCFactor;
-	// other interface settings
-	bool m_InterfaceToolbar;
-	bool m_InterfaceStatusbar;
-	bool m_InterfaceLogWindow;
-	bool m_InterfaceLogConfigWindow;
-	bool m_InterfaceExtendedFPSInfo;
-
-	bool m_ListDrives;
-	bool m_ListWad;
-	bool m_ListElfDol;
-	bool m_ListWii;
-	bool m_ListGC;
-	bool m_ListPal;
-	bool m_ListUsa;
-	bool m_ListJap;
-	bool m_ListAustralia;
-	bool m_ListFrance;
-	bool m_ListGermany;
-	bool m_ListItaly;
-	bool m_ListKorea;
-	bool m_ListNetherlands;
-	bool m_ListRussia;
-	bool m_ListSpain;
-	bool m_ListTaiwan;
-	bool m_ListWorld;
-	bool m_ListUnknown;
-	int m_ListSort;
-	int m_ListSort2;
-
-	// Game list column toggles
-	bool m_showSystemColumn;
-	bool m_showBannerColumn;
-	bool m_showMakerColumn;
-	bool m_showFileNameColumn;
-	bool m_showIDColumn;
-	bool m_showRegionColumn;
-	bool m_showSizeColumn;
-	bool m_showStateColumn;
-
-	// Toggles whether compressed titles show up in blue in the game list
-	bool m_ColorCompressed;
-
-	std::string m_WirelessMac;
-	bool m_PauseMovie;
-	bool m_ShowLag;
-	bool m_ShowFrameCount;
-	std::string m_strMovieAuthor;
-	unsigned int m_FrameSkip;
-	bool m_DumpFrames;
-	bool m_DumpFramesSilent;
-	bool m_ShowInputDisplay;
-
-	bool m_PauseOnFocusLost;
-
-	// DSP settings
-	bool m_DSPEnableJIT;
-	bool m_DSPCaptureLog;
-	bool m_DumpAudio;
-	bool m_IsMuted;
-	bool m_DumpUCode;
-	int m_Volume;
-	std::string sBackend;
-
-	// Input settings
-	bool m_BackgroundInput;
-	bool m_AdapterRumble[4];
-	bool m_AdapterKonga[4];
-
-	SysConf* m_SYSCONF;
-
-	// Save settings
-	void SaveSettings();
-
-	// Load settings
-	void LoadSettings();
-
-	// Return the permanent and somewhat globally used instance of this struct
-	static SConfig& GetInstance() { return(*m_Instance); }
-
-	static void Init();
-	static void Shutdown();
+  // Return the permanent and somewhat globally used instance of this struct
+  static SConfig& GetInstance() { return (*m_Instance); }
+  static void Init();
+  static void Shutdown();
 
 private:
-	SConfig();
-	~SConfig();
+  SConfig();
+  ~SConfig();
 
-	void SaveGeneralSettings(IniFile& ini);
-	void SaveInterfaceSettings(IniFile& ini);
-	void SaveDisplaySettings(IniFile& ini);
-	void SaveGameListSettings(IniFile& ini);
-	void SaveCoreSettings(IniFile& ini);
-	void SaveDSPSettings(IniFile& ini);
-	void SaveInputSettings(IniFile& ini);
-	void SaveMovieSettings(IniFile& ini);
-	void SaveFifoPlayerSettings(IniFile& ini);
-	void SaveAnalyticsSettings(IniFile& ini);
+  static void ReloadTextures(Core::System& system);
 
-	void LoadGeneralSettings(IniFile& ini);
-	void LoadInterfaceSettings(IniFile& ini);
-	void LoadDisplaySettings(IniFile& ini);
-	void LoadGameListSettings(IniFile& ini);
-	void LoadCoreSettings(IniFile& ini);
-	void LoadDSPSettings(IniFile& ini);
-	void LoadInputSettings(IniFile& ini);
-	void LoadMovieSettings(IniFile& ini);
-	void LoadFifoPlayerSettings(IniFile& ini);
-	void LoadAnalyticsSettings(IniFile& ini);
+  void SetRunningGameMetadata(const std::string& game_id, const std::string& gametdb_id,
+                              u64 title_id, u16 revision, DiscIO::Region region);
 
-	static SConfig* m_Instance;
+  static SConfig* m_Instance;
+  mutable std::recursive_mutex m_metadata_lock;
+
+  std::string m_game_id;
+  std::string m_gametdb_id;
+  std::string m_title_name;
+  std::string m_title_description;
+  u64 m_title_id;
+  u16 m_revision;
 };

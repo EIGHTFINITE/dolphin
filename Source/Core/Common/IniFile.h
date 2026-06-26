@@ -1,156 +1,146 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include <cstring>
 #include <list>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "Common/CommonFuncs.h"
-#include "Common/CommonTypes.h"
 #include "Common/StringUtil.h"
 
-struct CaseInsensitiveStringCompare
+namespace Common
 {
-	bool operator() (const std::string& a, const std::string& b) const
-	{
-		return strcasecmp(a.c_str(), b.c_str()) < 0;
-	}
-};
-
 class IniFile
 {
 public:
-	class Section
-	{
-		friend class IniFile;
+  class Section
+  {
+    friend class IniFile;
 
-	public:
-		Section() {}
-		Section(const std::string& _name) : name(_name) {}
+  public:
+    Section();
+    explicit Section(std::string name_);
+    bool Exists(std::string_view key) const;
+    bool Delete(std::string_view key);
 
-		bool Exists(const std::string& key) const;
-		bool Delete(const std::string& key);
+    void Set(const std::string& key, std::string new_value);
 
-		void Set(const std::string& key, const std::string& newValue);
-		void Set(const std::string& key, const std::string& newValue, const std::string& defaultValue);
+    template <typename T>
+    void Set(const std::string& key, T&& new_value)
+    {
+      Set(key, ValueToString(std::forward<T>(new_value)));
+    }
 
-		void Set(const std::string& key, u32 newValue)
-		{
-			Set(key, StringFromFormat("0x%08x", newValue));
-		}
+    template <typename T>
+    void Set(const std::string& key, T&& new_value, const std::common_type_t<T>& default_value)
+    {
+      if (new_value != default_value)
+        Set(key, std::forward<T>(new_value));
+      else
+        Delete(key);
+    }
 
-		void Set(const std::string& key, float newValue)
-		{
-			Set(key, StringFromFormat("%#.9g", newValue));
-		}
+    bool Get(std::string_view key, std::string* value,
+             const std::string& default_value = NULL_STRING) const;
 
-		void Set(const std::string& key, double newValue)
-		{
-			Set(key, StringFromFormat("%#.17g", newValue));
-		}
+    template <typename T>
+    bool Get(std::string_view key, T* value, const std::common_type_t<T>& default_value = {}) const
+    {
+      std::string temp;
+      bool retval = Get(key, &temp);
+      if (retval && TryParse(temp, value))
+        return true;
+      *value = default_value;
+      return false;
+    }
 
-		void Set(const std::string& key, int newValue)
-		{
-			Set(key, StringFromInt(newValue));
-		}
+    void SetLines(std::vector<std::string> lines);
+    bool GetLines(std::vector<std::string>* lines, const bool remove_comments = true) const;
 
-		void Set(const std::string& key, bool newValue)
-		{
-			Set(key, StringFromBool(newValue));
-		}
+    bool operator<(const Section& other) const { return name < other.name; }
+    using SectionMap = std::map<std::string, std::string, CaseInsensitiveLess>;
 
-		template<typename T>
-		void Set(const std::string& key, T newValue, const T defaultValue)
-		{
-			if (newValue != defaultValue)
-				Set(key, newValue);
-			else
-				Delete(key);
-		}
+    const std::string& GetName() const { return name; }
+    const SectionMap& GetValues() const { return values; }
+    bool HasLines() const { return !m_lines.empty(); }
 
-		void Set(const std::string& key, const std::vector<std::string>& newValues);
+  protected:
+    std::string name;
 
-		bool Get(const std::string& key, std::string* value, const std::string& defaultValue = NULL_STRING) const;
-		bool Get(const std::string& key, int* value, int defaultValue = 0) const;
-		bool Get(const std::string& key, u32* value, u32 defaultValue = 0) const;
-		bool Get(const std::string& key, bool* value, bool defaultValue = false) const;
-		bool Get(const std::string& key, float* value, float defaultValue = 0.0f) const;
-		bool Get(const std::string& key, double* value, double defaultValue = 0.0) const;
-		bool Get(const std::string& key, std::vector<std::string>* values) const;
+    std::vector<std::string> keys_order;
+    SectionMap values;
 
-		bool operator < (const Section& other) const
-		{
-			return name < other.name;
-		}
+    std::vector<std::string> m_lines;
+  };
 
-	protected:
-		std::string name;
+  IniFile();
+  ~IniFile();
 
-		std::vector<std::string> keys_order;
-		std::map<std::string, std::string, CaseInsensitiveStringCompare> values;
+  /**
+   * Loads sections and keys.
+   * @param filename filename of the ini file which should be loaded
+   * @param keep_current_data If true, "extends" the currently loaded list of sections and keys with
+   * the loaded data (and replaces existing entries). If false, existing data will be erased.
+   * @warning Using any other operations than "Get*" and "Exists" is untested and will behave
+   * unexpectedly
+   * @todo This really is just a hack to support having two levels of gameinis (defaults and
+   * user-specified) and should eventually be replaced with a less stupid system.
+   */
+  bool Load(const std::string& filename, bool keep_current_data = false);
 
-		std::vector<std::string> lines;
-	};
+  bool Save(const std::string& filename);
 
-	/**
-	 * Loads sections and keys.
-	 * @param filename filename of the ini file which should be loaded
-	 * @param keep_current_data If true, "extends" the currently loaded list of sections and keys with the loaded data (and replaces existing entries). If false, existing data will be erased.
-	 * @warning Using any other operations than "Get*" and "Exists" is untested and will behave unexpectedly
-	 * @todo This really is just a hack to support having two levels of gameinis (defaults and user-specified) and should eventually be replaced with a less stupid system.
-	 */
-	bool Load(const std::string& filename, bool keep_current_data = false);
+  bool Exists(std::string_view section_name) const;
+  // Returns true if key exists in section
+  bool Exists(std::string_view section_name, std::string_view key) const;
 
-	bool Save(const std::string& filename);
+  template <typename T>
+  bool GetIfExists(std::string_view section_name, std::string_view key, T* value)
+  {
+    if (Exists(section_name, key))
+      return GetOrCreateSection(section_name)->Get(key, value);
 
-	// Returns true if key exists in section
-	bool Exists(const std::string& sectionName, const std::string& key) const;
+    return false;
+  }
 
-	template<typename T> bool GetIfExists(const std::string& sectionName, const std::string& key, T* value)
-	{
-		if (Exists(sectionName, key))
-			return GetOrCreateSection(sectionName)->Get(key, value);
+  template <typename T>
+  bool GetIfExists(std::string_view section_name, std::string_view key, T* value, T default_value)
+  {
+    if (Exists(section_name, key))
+      return GetOrCreateSection(section_name)->Get(key, value, default_value);
 
-		return false;
-	}
+    *value = default_value;
+    return false;
+  }
 
-	template<typename T> bool GetIfExists(const std::string& sectionName, const std::string& key, T* value, T defaultValue)
-	{
-		if (Exists(sectionName, key))
-			return GetOrCreateSection(sectionName)->Get(key, value, defaultValue);
-		else
-			*value = defaultValue;
+  bool GetKeys(std::string_view section_name, std::vector<std::string>* keys) const;
 
-		return false;
-	}
+  void SetLines(std::string_view section_name, std::vector<std::string> lines);
+  bool GetLines(std::string_view section_name, std::vector<std::string>* lines,
+                bool remove_comments = true) const;
 
-	bool GetKeys(const std::string& sectionName, std::vector<std::string>* keys) const;
+  bool DeleteKey(std::string_view section_name, std::string_view key);
+  bool DeleteSection(std::string_view section_name);
 
-	void SetLines(const std::string& sectionName, const std::vector<std::string>& lines);
-	bool GetLines(const std::string& sectionName, std::vector<std::string>* lines, const bool remove_comments = true) const;
+  void SortSections();
 
-	bool DeleteKey(const std::string& sectionName, const std::string& key);
-	bool DeleteSection(const std::string& sectionName);
+  Section* GetOrCreateSection(std::string_view section_name);
+  const Section* GetSection(std::string_view section_name) const;
+  Section* GetSection(std::string_view section_name);
 
-	void SortSections();
+  // This function is related to parsing data from lines of INI files
+  // It's used outside of IniFile, which is why it is exposed publicly
+  // In particular it is used in PostProcessing for its configuration
+  static void ParseLine(std::string_view line, std::string* keyOut, std::string* valueOut);
 
-	Section* GetOrCreateSection(const std::string& section);
-
-	// This function is related to parsing data from lines of INI files
-	// It's used outside of IniFile, which is why it is exposed publicly
-	// In particular it is used in PostProcessing for its configuration
-	static void ParseLine(const std::string& line, std::string* keyOut, std::string* valueOut);
+  const std::list<Section>& GetSections() const { return sections; }
 
 private:
-	std::list<Section> sections;
+  std::list<Section> sections;
 
-	const Section* GetSection(const std::string& section) const;
-	Section* GetSection(const std::string& section);
-
-	static const std::string& NULL_STRING;
+  static const std::string& NULL_STRING;
 };
+}  // namespace Common
