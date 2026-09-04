@@ -4,65 +4,31 @@ If you'd like to contribute to the Android project, but do not currently have a 
 
 ## Prerequisites
 
-* A Linux VM or host, or a Mac.
-* JDK 7 for your platform.
-* CMake
-* [Android NDK](https://developer.android.com/tools/sdk/ndk/index.html) 
-* [Android Studio](http://developer.android.com/tools/studio/index.html) **OR**
-* [Android SDK Tools](http://developer.android.com/sdk/index.html#Other) (for command-line usage)
+* [Android Studio](https://developer.android.com/studio/)
 
-If you downloaded Android Studio, extract it and then see [Setting up Android Studio](#setting-up-android-studio).
+Install Android Studio with the default options if you do not already have it.
 
-If you instead chose to download the commoand-line SDK tools, see [Setting up the SDK Tools](#setting-up-the-sdk-tools).
+## Setting Up Android Studio
 
-## Setting up Android Studio
+1. Open the `Source/Android` project in Android Studio, let any background tasks finish, and Android Studio will automatically download the required SDK components and tooling.
+2. Use the hammer icon or **Build > Assemble 'app' Run Configuration** to compile the `:app` module, then choose **Build > Generate App Bundles or APKs > Generate APKs** to produce the APK in `Source/Android/app/build/outputs/apk`.
 
-1. Launch Android Studio, which will start a first-launch wizard.
-2. Choose a custom installation.
-3. If offered a choice of themes, select your preference.
-4. When offered a choice of components, uncheck the "Android Virtual Device" option. ![Android Studio Components][components]
-5. Accept all licenses, and click Finish. Android Studio will download the SDK Tools package automatically. (Ubuntu users, if you get an error running the `mksdcard` tool, make sure the `lib32stdc++6` package is installed.)
-6. At the Android Studio welcome screen, click "Configure", then "SDK Manager".
-7. Use the SDK Manager to get necessary dependencies, as described in [Getting Dependencies](#getting-dependencies).
-8. When done, follow the steps in [Readme.md](Readme.md#installation-on-android) to compile and deploy the application.
+## Import the Dolphin code style
 
-## Setting up the SDK Tools
+The project maintains a custom IntelliJ/Android Studio style file to keep Java and Kotlin formatting consistent.
 
-1. In `Source/Android`, create a file called `local.properties`.
-2. Add a single line: `sdk.dir=<sdk-path>`, where `<sdk-path>` is the path where you extracted the SDK Tools package.
-3. Follow the steps in [Readme.md](Readme.md#installation-on-android) to compile and deploy the application.
+* Go to **File > Settings > Editor > Code Style** (or **Android Studio > Settings > Editor > Code Style** on macOS).
+* Click the gear icon and choose **Import Scheme**.
+* Select `Source/Android/code-style-java.xml` from the repository.
+* Ensure that Dolphin-Java is selected.
 
-## Executing Gradle Tasks
+## Format code before opening a pull request
 
-In Android Studio, you can find a list of possible Gradle tasks in a tray at the top right of the screen:
+Before committing or submitting a pull request, reformat any Java or Kotlin files you modified:
 
-![Gradle Tasks][gradle]
+* Use **Code > Reformat Code** (or press `Ctrl+Alt+L`/`⌥⌘L` on macOS) with the Dolphin code style selected.
+* Re-run formatting after edits to keep spacing, imports, and wrapping consistent with the rest of the project.
 
-Double clicking any of these tasks will execute it, and also add it to a short list in the main toolbar:
+## Compiling from the Command-Line
 
-![Gradle Task Shortcuts][shortcut]
-
-Clicking the green triangle next to this list will execute the currently selected task.
-
-For command-line users, any task may be executed with `Source/Android/gradlew <task-name>`.
-
-## Getting Dependencies
-
-Most dependencies for the Android project are supplied by Gradle automatically. However, Android platform libraries (and a few Google-supplied supplementary libraries) must be downloaded through the Android package manager.
-
-1. Launch the Android SDK Manager from the commandline by executing `<sdk-path>/tools/android`, or by clicking on its icon in Android Studio's main toolbar:
-![Android Studio Package Icon][package-icon]
-2. At the bottom of the window, click "Deselect All", and then "Updates".
-3. Install or update the following packages:
-
-* SDK Platform, under "Android 5.0.1 (API 21)". This will allow compiling apps that target Lollipop.
-* Android Support Repository
-* Android Support Library
-* Google Repository
-
-In the future, if the project targets a newer version of Android, or use newer versions of the tools/build-tools packages, it will be necessary to use this tool to download updates.
-
-[components]: http://i.imgur.com/Oo1Fs93.png
-[package-icon]: http://i.imgur.com/NUpkAH8.png
-[gradle]: http://i.imgur.com/dXIH6o3.png
-[shortcut]: http://i.imgur.com/eCWP4Yy.png
+For command-line users, any task may be executed with `cd Source/Android` followed by `gradlew <task-name>`. In particular, `gradlew assemble` builds debug and release versions of the application (which are placed in `Source/Android/app/build/outputs/apk`).

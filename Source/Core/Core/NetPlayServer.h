@@ -1,139 +1,214 @@
 // Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
+#include <SFML/Network/Packet.hpp>
+
 #include <map>
 #include <mutex>
-#include <queue>
-#include <sstream>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
-#include <SFML/Network/Packet.hpp>
+#include <utility>
+
+#include "Common/Event.h"
+#include "Common/QoSSession.h"
+#include "Common/SPSCQueue.h"
 #include "Common/Timer.h"
 #include "Common/TraversalClient.h"
 #include "Core/NetPlayProto.h"
+#include "Core/SyncIdentifier.h"
+#include "UICommon/NetPlayIndex.h"
 
+namespace NetPlay
+{
 class NetPlayUI;
+struct SaveSyncInfo;
 
-class NetPlayServer : public TraversalClientClient
+class NetPlayServer : public Common::TraversalClientClient
 {
 public:
-	void ThreadFunc();
-	void SendAsyncToClients(std::unique_ptr<sf::Packet> packet);
+  void ThreadFunc();
+  void SendAsync(sf::Packet&& packet, PlayerId pid, u8 channel_id = DEFAULT_CHANNEL);
+  void SendAsyncToClients(sf::Packet&& packet, PlayerId skip_pid = 0,
+                          u8 channel_id = DEFAULT_CHANNEL);
+  void SendChunked(sf::Packet&& packet, PlayerId pid, const std::string& title = "");
+  void SendChunkedToClients(sf::Packet&& packet, PlayerId skip_pid = 0,
+                            const std::string& title = "");
 
-	NetPlayServer(const u16 port, bool traversal, const std::string& centralServer, u16 centralPort);
-	~NetPlayServer();
+  NetPlayServer(u16 port, bool forward_port, NetPlayUI* dialog,
+                const NetTraversalConfig& traversal_config);
+  ~NetPlayServer() override;
 
-	bool ChangeGame(const std::string& game);
-	void SendChatMessage(const std::string& msg);
+  bool ChangeGame(const SyncIdentifier& sync_identifier, const std::string& netplay_name);
+  bool ComputeGameDigest(const SyncIdentifier& sync_identifier);
+  bool AbortGameDigest();
+  void SendChatMessage(const std::string& msg);
 
-	void SetNetSettings(const NetSettings &settings);
+  bool DoAllPlayersHaveIPLDump() const;
+  bool DoAllPlayersHaveHardwareFMA() const;
+  bool StartGame();
+  bool RequestStartGame();
+  void AbortGameStart();
 
-	bool StartGame();
+  PadMappingArray GetPadMapping() const;
+  void SetPadMapping(const PadMappingArray& mappings);
 
-	PadMappingArray GetPadMapping() const;
-	void SetPadMapping(const PadMappingArray& mappings);
+  GBAConfigArray GetGBAConfig() const;
+  void SetGBAConfig(const GBAConfigArray& configs, bool update_rom);
 
-	PadMappingArray GetWiimoteMapping() const;
-	void SetWiimoteMapping(const PadMappingArray& mappings);
+  PadMappingArray GetWiimoteMapping() const;
+  void SetWiimoteMapping(const PadMappingArray& mappings);
 
-	void AdjustPadBufferSize(unsigned int size);
+  void AdjustPadBufferSize(unsigned int size);
+  void SetHostInputAuthority(bool enable);
 
-	void KickPlayer(PlayerId player);
+  void KickPlayer(PlayerId player);
 
-	u16 GetPort();
+  u16 GetPort() const;
 
-	void SetNetPlayUI(NetPlayUI* dialog);
-	std::unordered_set<std::string> GetInterfaceSet();
-	std::string GetInterfaceHost(const std::string& inter);
+  std::unordered_set<std::string> GetInterfaceSet() const;
+  std::string GetInterfaceHost(const std::string& inter) const;
 
-	bool is_connected = false;
-
-#ifdef USE_UPNP
-	void TryPortmapping(u16 port);
-#endif
+  bool is_connected = false;
 
 private:
-	class Client
-	{
-	public:
-		PlayerId    pid;
-		std::string name;
-		std::string revision;
+  class Client
+  {
+  public:
+    PlayerId pid{};
+    std::string name;
+    std::string revision;
+    SyncIdentifierComparison game_status = SyncIdentifierComparison::Unknown;
+    bool has_ipl_dump = false;
+    bool has_hardware_fma = false;
 
-		ENetPeer* socket;
-		u32 ping;
-		u32 current_game;
+    ENetPeer* socket = nullptr;
+    u32 ping = 0;
+    u32 current_game = 0;
 
-		bool operator==(const Client& other) const
-		{
-			return this == &other;
-		}
-	};
+    Common::QoSSession qos_session;
 
-	void SendToClients(sf::Packet& packet, const PlayerId skip_pid = 0);
-	void Send(ENetPeer* socket, sf::Packet& packet);
-	unsigned int OnConnect(ENetPeer* socket);
-	unsigned int OnDisconnect(Client& player);
-	unsigned int OnData(sf::Packet& packet, Client& player);
+    bool operator==(const Client& other) const { return this == &other; }
+    bool IsHost() const { return pid == 1; }
+  };
 
-	void OnTraversalStateChanged() override;
-	void OnConnectReady(ENetAddress) override {}
-	void OnConnectFailed(u8) override {}
+  enum class TargetMode
+  {
+    Only,
+    AllExcept
+  };
 
-	void UpdatePadMapping();
-	void UpdateWiimoteMapping();
-	std::vector<std::pair<std::string, std::string>> GetInterfaceListInternal();
+  struct AsyncQueueEntry
+  {
+    sf::Packet packet;
+    PlayerId target_pid{};
+    TargetMode target_mode{};
+    u8 channel_id = 0;
+  };
 
-	NetSettings     m_settings;
+  struct ChunkedDataQueueEntry
+  {
+    sf::Packet packet;
+    PlayerId target_pid{};
+    TargetMode target_mode{};
+    std::string title;
+  };
 
-	bool            m_is_running = false;
-	bool            m_do_loop = false;
-	Common::Timer   m_ping_timer;
-	u32             m_ping_key = 0;
-	bool            m_update_pings = false;
-	u32             m_current_game = 0;
-	unsigned int    m_target_buffer_size = 0;
-	PadMappingArray m_pad_map;
-	PadMappingArray m_wiimote_map;
+  bool SetupNetSettings();
+  std::optional<SaveSyncInfo> CollectSaveSyncInfo();
+  bool SyncSaveData(const SaveSyncInfo& sync_info);
+  bool SyncCodes();
+  void CheckSyncAndStartGame();
 
-	std::map<PlayerId, Client> m_players;
+  u64 GetInitialNetPlayRTC() const;
 
-	std::unordered_map<u32, std::vector<std::pair<PlayerId, u64>>> m_timebase_by_frame;
-	bool m_desync_detected;
+  template <typename... Data>
+  void SendResponseToPlayer(const Client& player, const MessageID message_id,
+                            Data&&... data_to_send);
+  template <typename... Data>
+  void SendResponseToAllPlayers(const MessageID message_id, Data&&... data_to_send);
+  void SendToClients(const sf::Packet& packet, PlayerId skip_pid = 0,
+                     u8 channel_id = DEFAULT_CHANNEL);
+  void Send(ENetPeer* socket, const sf::Packet& packet, u8 channel_id = DEFAULT_CHANNEL);
+  ConnectionError OnConnect(ENetPeer* socket, sf::Packet& received_packet);
+  unsigned int OnDisconnect(const Client& player);
+  unsigned int OnData(sf::Packet& packet, Client& player);
 
-	struct
-	{
-		std::recursive_mutex game;
-		// lock order
-		std::recursive_mutex players;
-		std::recursive_mutex async_queue_write;
-	} m_crit;
+  void OnTraversalStateChanged() override;
+  void OnConnectReady(ENetAddress) override {}
+  void OnConnectFailed(Common::TraversalConnectFailedReason) override {}
+  void OnTtlDetermined(u8 ttl) override;
+  void UpdatePadMapping();
+  void UpdateGBAConfig();
+  void UpdateWiimoteMapping();
+  std::vector<std::pair<std::string, std::string>> GetInterfaceListInternal() const;
+  void ChunkedDataThreadFunc();
+  void ChunkedDataSend(sf::Packet&& packet, PlayerId pid, const TargetMode target_mode);
+  void ChunkedDataAbort();
 
-	std::string m_selected_game;
-	std::thread m_thread;
-	Common::FifoQueue<std::unique_ptr<sf::Packet>, false> m_async_queue;
+  void SetupIndex();
+  bool PlayerHasControllerMapped(PlayerId pid) const;
 
-	ENetHost*        m_server = nullptr;
-	TraversalClient* m_traversal_client = nullptr;
-	NetPlayUI*       m_dialog = nullptr;
+  // pulled from OnConnect()
+  void AssignNewUserAPad(const Client& player);
+  // pulled from OnConnect()
+  // returns the PID given
+  PlayerId GiveFirstAvailableIDTo(ENetPeer* player);
 
-#ifdef USE_UPNP
-	static void mapPortThread(const u16 port);
-	static void unmapPortThread();
+  NetSettings m_settings;
 
-	static bool initUPnP();
-	static bool UPnPMapPort(const std::string& addr, const u16 port);
-	static bool UPnPUnmapPort(const u16 port);
+  bool m_is_running = false;
+  bool m_do_loop = false;
+  Common::Timer m_ping_timer;
+  u32 m_ping_key = 0;
+  bool m_update_pings = false;
+  u32 m_current_game = 0;
+  unsigned int m_target_buffer_size = 0;
+  PadMappingArray m_pad_map;
+  GBAConfigArray m_gba_config;
+  PadMappingArray m_wiimote_map;
+  unsigned int m_save_data_synced_players = 0;
+  unsigned int m_codes_synced_players = 0;
+  bool m_saves_synced = true;
+  bool m_codes_synced = true;
+  bool m_start_pending = false;
+  bool m_host_input_authority = false;
+  PlayerId m_current_golfer = 1;
+  PlayerId m_pending_golfer = 0;
 
-	static struct UPNPUrls m_upnp_urls;
-	static struct IGDdatas m_upnp_data;
-	static u16 m_upnp_mapped;
-	static bool m_upnp_inited;
-	static bool m_upnp_error;
-	static std::thread m_upnp_thread;
-#endif
+  std::map<PlayerId, Client> m_players;
+
+  std::unordered_map<u32, std::vector<std::pair<PlayerId, u64>>> m_timebase_by_frame;
+  bool m_desync_detected = false;
+
+  struct
+  {
+    std::recursive_mutex game;
+    // lock order
+    std::recursive_mutex players;
+    std::recursive_mutex async_queue_write;
+    std::recursive_mutex chunked_data_queue_write;
+  } m_crit;
+
+  Common::SPSCQueue<AsyncQueueEntry> m_async_queue;
+  Common::SPSCQueue<ChunkedDataQueueEntry> m_chunked_data_queue;
+
+  SyncIdentifier m_selected_game_identifier;
+  std::string m_selected_game_name;
+  std::thread m_thread;
+  Common::Event m_chunked_data_event;
+  Common::Event m_chunked_data_complete_event;
+  std::thread m_chunked_data_thread;
+  u32 m_next_chunked_data_id = 0;
+  std::unordered_map<u32, unsigned int> m_chunked_data_complete_count;
+  bool m_abort_chunked_data = false;
+
+  ENetHost* m_server = nullptr;
+  Common::TraversalClient* m_traversal_client = nullptr;
+  NetPlayUI* m_dialog = nullptr;
+  NetPlayIndex m_index;
 };
+}  // namespace NetPlay
