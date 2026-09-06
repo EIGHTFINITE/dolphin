@@ -1,45 +1,66 @@
 // Copyright 2014 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Common/GL/GLInterface/EGLX11.h"
-#include "Common/Logging/Log.h"
 
-EGLDisplay cInterfaceEGLX11::OpenDisplay()
+#include <cstdlib>
+
+#include "Common/StringUtil.h"
+
+GLContextEGLX11::GLContextEGLX11()
 {
-	dpy = XOpenDisplay(nullptr);
-	XWindow.Initialize(dpy);
-	return eglGetDisplay(dpy);
+  // HACK: If EGL_PLATFORM is set to "wayland", Dolphin will still use GLContextEGLX11 due to our
+  // lack of proper Wayland support, and crash.
+  // Some distros have started aggressively setting that environment variable, bypassing the usual
+  // runtime detection. Thus, clear that environment variable if it forces wayland.
+  const char* current_egl_platform = getenv("EGL_PLATFORM");
+  const bool replace_egl_platform =
+      current_egl_platform != nullptr &&
+      Common::CaseInsensitiveContains(current_egl_platform, "wayland");
+  setenv("EGL_PLATFORM", "", replace_egl_platform);
 }
 
-EGLNativeWindowType cInterfaceEGLX11::InitializePlatform(EGLNativeWindowType host_window, EGLConfig config)
+GLContextEGLX11::~GLContextEGLX11()
 {
-	EGLint vid;
-	eglGetConfigAttrib(egl_dpy, config, EGL_NATIVE_VISUAL_ID, &vid);
-
-	XVisualInfo visTemplate;
-	visTemplate.visualid = vid;
-
-	XVisualInfo *vi;
-	int nVisuals;
-	vi = XGetVisualInfo(dpy, VisualIDMask, &visTemplate, &nVisuals);
-
-	XWindowAttributes attribs;
-	if (!XGetWindowAttributes(dpy, (Window)host_window, &attribs))
-	{
-		ERROR_LOG(VIDEO, "Window attribute retrieval failed");
-		return 0;
-	}
-
-	s_backbuffer_width  = attribs.width;
-	s_backbuffer_height = attribs.height;
-
-	return (EGLNativeWindowType) XWindow.CreateXWindow((Window) host_window, vi);
+  // The context must be destroyed before the window.
+  DestroyWindowSurface();
+  DestroyContext();
+  m_render_window.reset();
 }
 
-void cInterfaceEGLX11::ShutdownPlatform()
+void GLContextEGLX11::Update()
 {
-	XWindow.DestroyXWindow();
-	XCloseDisplay(dpy);
+  m_render_window->UpdateDimensions();
+  m_backbuffer_width = m_render_window->GetWidth();
+  m_backbuffer_height = m_render_window->GetHeight();
 }
 
+EGLDisplay GLContextEGLX11::OpenEGLDisplay()
+{
+  return eglGetDisplay(static_cast<Display*>(m_wsi.display_connection));
+}
+
+EGLNativeWindowType GLContextEGLX11::GetEGLNativeWindow(EGLConfig config)
+{
+  EGLint vid;
+  eglGetConfigAttrib(m_egl_display, config, EGL_NATIVE_VISUAL_ID, &vid);
+
+  XVisualInfo visTemplate = {};
+  visTemplate.visualid = vid;
+
+  int nVisuals;
+  XVisualInfo* vi = XGetVisualInfo(static_cast<Display*>(m_wsi.display_connection), VisualIDMask,
+                                   &visTemplate, &nVisuals);
+
+  if (m_render_window)
+    m_render_window.reset();
+
+  m_render_window = GLX11Window::Create(static_cast<Display*>(m_wsi.display_connection),
+                                        reinterpret_cast<Window>(m_wsi.render_surface), vi);
+  m_backbuffer_width = m_render_window->GetWidth();
+  m_backbuffer_height = m_render_window->GetHeight();
+
+  XFree(vi);
+
+  return reinterpret_cast<EGLNativeWindowType>(m_render_window->GetWindow());
+}

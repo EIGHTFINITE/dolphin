@@ -1,210 +1,257 @@
 // Copyright 2014 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-#include <string>
-#include "Common/Thread.h"
 #include "InputCommon/ControllerInterface/ForceFeedback/ForceFeedbackDevice.h"
 
-namespace ciface
-{
-namespace ForceFeedback
-{
+#include <array>
+#include <string>
 
-// template instantiation
-template class ForceFeedbackDevice::Force<DICONSTANTFORCE>;
-template class ForceFeedbackDevice::Force<DIRAMPFORCE>;
-template class ForceFeedbackDevice::Force<DIPERIODIC>;
+#include "Common/Thread.h"
+
+namespace ciface::ForceFeedback
+{
+// Template instantiation:
+template class ForceFeedbackDevice::TypedForce<DICONSTANTFORCE>;
+template class ForceFeedbackDevice::TypedForce<DIRAMPFORCE>;
+template class ForceFeedbackDevice::TypedForce<DIPERIODIC>;
 
 struct ForceType
 {
-	GUID guid;
-	const std::string name;
+  GUID guid;
+  const char* name;
 };
 
-static const ForceType force_type_names[] =
-{
-	{GUID_ConstantForce, "Constant"}, // DICONSTANTFORCE
-	{GUID_RampForce, "Ramp"},         // DIRAMPFORCE
-	{GUID_Square, "Square"},          // DIPERIODIC ...
-	{GUID_Sine, "Sine"},
-	{GUID_Triangle, "Triangle"},
-	{GUID_SawtoothUp, "Sawtooth Up"},
-	{GUID_SawtoothDown, "Sawtooth Down"},
-	//{GUID_Spring, "Spring"},          // DICUSTOMFORCE ... < I think
-	//{GUID_Damper, "Damper"},
-	//{GUID_Inertia, "Inertia"},
-	//{GUID_Friction, "Friction"},
+static const ForceType force_type_names[] = {
+    {GUID_ConstantForce, "Constant"},  // DICONSTANTFORCE
+    {GUID_RampForce, "Ramp"},          // DIRAMPFORCE
+    {GUID_Square, "Square"},           // DIPERIODIC ...
+    {GUID_Sine, "Sine"},
+    {GUID_Triangle, "Triangle"},
+    {GUID_SawtoothUp, "Sawtooth Up"},
+    {GUID_SawtoothDown, "Sawtooth Down"},
+    //{GUID_Spring, "Spring"},          // DICUSTOMFORCE ... < I think
+    //{GUID_Damper, "Damper"},
+    //{GUID_Inertia, "Inertia"},
+    //{GUID_Friction, "Friction"},
 };
 
-bool ForceFeedbackDevice::InitForceFeedback(const LPDIRECTINPUTDEVICE8 device, int cAxes)
+void ForceFeedbackDevice::DeInitForceFeedback()
 {
-	if (cAxes == 0)
-		return false;
+  if (!m_run_thread.TestAndClear())
+    return;
 
-	// TODO: check for DIDC_FORCEFEEDBACK in devcaps?
-
-	// temporary
-	DWORD rgdwAxes[2] = {DIJOFS_X, DIJOFS_Y};
-	LONG rglDirection[2] = {-200, 0};
-
-	DIEFFECT eff;
-	memset(&eff, 0, sizeof(eff));
-	eff.dwSize = sizeof(DIEFFECT);
-	eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
-	eff.dwDuration = INFINITE; // (4 * DI_SECONDS)
-	eff.dwSamplePeriod = 0;
-	eff.dwGain = DI_FFNOMINALMAX;
-	eff.dwTriggerButton = DIEB_NOTRIGGER;
-	eff.dwTriggerRepeatInterval = 0;
-	eff.cAxes = std::min<DWORD>(1, cAxes);
-	eff.rgdwAxes = rgdwAxes;
-	eff.rglDirection = rglDirection;
-
-	// initialize parameters
-	DICONSTANTFORCE diCF = { -10000 };
-	diCF.lMagnitude = DI_FFNOMINALMAX;
-	DIRAMPFORCE diRF = { 0 };
-	DIPERIODIC diPE = { 0 };
-
-	// doesn't seem needed
-	//DIENVELOPE env;
-	//eff.lpEnvelope = &env;
-	//ZeroMemory(&env, sizeof(env));
-	//env.dwSize = sizeof(env);
-
-	for (const ForceType& f : force_type_names)
-	{
-		if (f.guid == GUID_ConstantForce)
-		{
-			eff.cbTypeSpecificParams = sizeof(DICONSTANTFORCE);
-			eff.lpvTypeSpecificParams = &diCF;
-		}
-		else if (f.guid == GUID_RampForce)
-		{
-			eff.cbTypeSpecificParams = sizeof(DIRAMPFORCE);
-			eff.lpvTypeSpecificParams = &diRF;
-		}
-		else
-		{
-			// all other forces need periodic parameters
-			eff.cbTypeSpecificParams = sizeof(DIPERIODIC);
-			eff.lpvTypeSpecificParams = &diPE;
-		}
-
-		LPDIRECTINPUTEFFECT pEffect;
-		if (SUCCEEDED(device->CreateEffect(f.guid, &eff, &pEffect, nullptr)))
-		{
-			if (f.guid == GUID_ConstantForce)
-				AddOutput(new ForceConstant(f.name, pEffect));
-			else if (f.guid == GUID_RampForce)
-				AddOutput(new ForceRamp(f.name, pEffect));
-			else
-				AddOutput(new ForcePeriodic(f.name, pEffect));
-		}
-	}
-
-	// disable autocentering
-	if (Outputs().size())
-	{
-		DIPROPDWORD dipdw;
-		dipdw.diph.dwSize = sizeof( DIPROPDWORD );
-		dipdw.diph.dwHeaderSize = sizeof( DIPROPHEADER );
-		dipdw.diph.dwObj = 0;
-		dipdw.diph.dwHow = DIPH_DEVICE;
-		dipdw.dwData = DIPROPAUTOCENTER_OFF;
-		device->SetProperty( DIPROP_AUTOCENTER, &dipdw.diph );
-	}
-
-	return true;
+  SignalUpdateThread();
+  m_update_thread.join();
 }
 
-template<typename P>
-ForceFeedbackDevice::Force<P>::~Force()
+void ForceFeedbackDevice::ThreadFunc()
 {
-	m_iface->Stop();
-	m_iface->Unload();
-	m_iface->Release();
+  Common::SetCurrentThreadName("ForceFeedback update thread");
+
+  while (m_run_thread.IsSet())
+  {
+    m_update_event.Wait();
+
+    for (auto output : Outputs())
+    {
+      auto& force = *static_cast<Force*>(output);
+      force.UpdateOutput();
+    }
+  }
+
+  for (auto output : Outputs())
+  {
+    auto& force = *static_cast<Force*>(output);
+    force.Release();
+  }
 }
 
-template<typename P>
-void ForceFeedbackDevice::Force<P>::Update()
+void ForceFeedbackDevice::SignalUpdateThread()
 {
-	DIEFFECT eff = {};
-	eff.dwSize = sizeof(DIEFFECT);
-	eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
-
-	eff.cbTypeSpecificParams = sizeof(P);
-	eff.lpvTypeSpecificParams = &params;
-
-	// set params and start effect
-	m_iface->SetParameters(&eff, DIEP_TYPESPECIFICPARAMS | DIEP_START);
+  m_update_event.Set();
 }
 
-template<typename P>
-void ForceFeedbackDevice::Force<P>::Stop()
+bool ForceFeedbackDevice::InitForceFeedback(const LPDIRECTINPUTDEVICE8 device, int axis_count)
 {
-	m_iface->Stop();
-}
+  if (axis_count == 0)
+    return false;
 
-template<>
-void ForceFeedbackDevice::ForceConstant::SetState(const ControlState state)
-{
-	const LONG new_val = LONG(10000 * state);
+  // We just use the X axis (for wheel left/right).
+  // Gamepads seem to not care which axis you use.
+  // These are temporary for creating the effect:
+  std::array<DWORD, 1> rgdwAxes = {DIJOFS_X};
+  std::array<LONG, 1> rglDirection = {-200};
 
-	if (params.lMagnitude == new_val)
-		return;
+  DIEFFECT eff{};
+  eff.dwSize = sizeof(eff);
+  eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
+  eff.dwDuration = DI_SECONDS / 1000 * RUMBLE_LENGTH_MS;
+  eff.dwSamplePeriod = 0;
+  eff.dwGain = DI_FFNOMINALMAX;
+  eff.dwTriggerButton = DIEB_NOTRIGGER;
+  eff.dwTriggerRepeatInterval = 0;
+  eff.cAxes = DWORD(rgdwAxes.size());
+  eff.rgdwAxes = rgdwAxes.data();
+  eff.rglDirection = rglDirection.data();
+  eff.dwStartDelay = 0;
 
-	params.lMagnitude = new_val;
-	if (new_val)
-		Update();
-	else
-		Stop();
-}
+  // Initialize parameters with zero force (their current state).
+  DICONSTANTFORCE diCF{};
+  diCF.lMagnitude = 0;
+  DIRAMPFORCE diRF{};
+  diRF.lStart = diRF.lEnd = 0;
+  DIPERIODIC diPE{};
+  diPE.dwMagnitude = 0;
+  diPE.lOffset = 0;
+  diPE.dwPhase = 0;
+  diPE.dwPeriod = DI_SECONDS / 1000 * RUMBLE_PERIOD_MS;
 
-template<>
-void ForceFeedbackDevice::ForceRamp::SetState(const ControlState state)
-{
-	const LONG new_val = LONG(10000 * state);
+  for (auto& f : force_type_names)
+  {
+    if (f.guid == GUID_ConstantForce)
+    {
+      eff.cbTypeSpecificParams = sizeof(DICONSTANTFORCE);
+      eff.lpvTypeSpecificParams = &diCF;
+    }
+    else if (f.guid == GUID_RampForce)
+    {
+      eff.cbTypeSpecificParams = sizeof(DIRAMPFORCE);
+      eff.lpvTypeSpecificParams = &diRF;
+    }
+    else
+    {
+      // All other forces need periodic parameters:
+      eff.cbTypeSpecificParams = sizeof(DIPERIODIC);
+      eff.lpvTypeSpecificParams = &diPE;
+    }
 
-	if (params.lStart == new_val)
-		return;
+    LPDIRECTINPUTEFFECT pEffect;
+    if (SUCCEEDED(device->CreateEffect(f.guid, &eff, &pEffect, nullptr)))
+    {
+      if (f.guid == GUID_ConstantForce)
+        AddOutput(new ForceConstant(this, f.name, pEffect, diCF));
+      else if (f.guid == GUID_RampForce)
+        AddOutput(new ForceRamp(this, f.name, pEffect, diRF));
+      else
+        AddOutput(new ForcePeriodic(this, f.name, pEffect, diPE));
+    }
+  }
 
-	params.lStart = params.lEnd = new_val;
-	if (new_val)
-		Update();
-	else
-		Stop();
-}
+  // Disable autocentering:
+  if (Outputs().size())
+  {
+    DIPROPDWORD dipdw;
+    dipdw.diph.dwSize = sizeof(DIPROPDWORD);
+    dipdw.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+    dipdw.diph.dwObj = 0;
+    dipdw.diph.dwHow = DIPH_DEVICE;
+    dipdw.dwData = DIPROPAUTOCENTER_OFF;
+    device->SetProperty(DIPROP_AUTOCENTER, &dipdw.diph);
 
-template<>
-void ForceFeedbackDevice::ForcePeriodic::SetState(const ControlState state)
-{
-	const DWORD new_val = DWORD(10000 * state);
+    m_run_thread.Set();
+    m_update_thread = std::thread(&ForceFeedbackDevice::ThreadFunc, this);
+  }
 
-	if (params.dwMagnitude == new_val)
-		return;
-
-	params.dwMagnitude = new_val;
-	if (new_val)
-		Update();
-	else
-		Stop();
+  return true;
 }
 
 template <typename P>
-ForceFeedbackDevice::Force<P>::Force(const std::string& name, LPDIRECTINPUTEFFECT iface)
-: m_name(name), m_iface(iface)
+void ForceFeedbackDevice::TypedForce<P>::PlayEffect()
 {
-	memset(&params, 0, sizeof(params));
+  DIEFFECT eff{};
+  eff.dwSize = sizeof(eff);
+  eff.cbTypeSpecificParams = sizeof(m_params);
+  eff.lpvTypeSpecificParams = &m_params;
+
+  m_effect->SetParameters(&eff, DIEP_START | DIEP_TYPESPECIFICPARAMS);
 }
 
 template <typename P>
-std::string ForceFeedbackDevice::Force<P>::GetName() const
+void ForceFeedbackDevice::TypedForce<P>::StopEffect()
 {
-	return m_name;
+  m_effect->Stop();
 }
 
+template <>
+bool ForceFeedbackDevice::ForceConstant::UpdateParameters(int magnitude)
+{
+  const auto old_magnitude = m_params.lMagnitude;
+
+  m_params.lMagnitude = magnitude;
+
+  return old_magnitude != m_params.lMagnitude;
 }
+
+template <>
+bool ForceFeedbackDevice::ForceRamp::UpdateParameters(int magnitude)
+{
+  const auto old_magnitude = m_params.lStart;
+
+  // Having the same "start" and "end" here is a bit odd..
+  // But ramp forces don't really make sense for our rumble effects anyways..
+  m_params.lStart = m_params.lEnd = magnitude;
+
+  return old_magnitude != m_params.lStart;
 }
+
+template <>
+bool ForceFeedbackDevice::ForcePeriodic::UpdateParameters(int magnitude)
+{
+  const auto old_magnitude = m_params.dwMagnitude;
+
+  m_params.dwMagnitude = magnitude;
+
+  return old_magnitude != m_params.dwMagnitude;
+}
+
+template <typename P>
+ForceFeedbackDevice::TypedForce<P>::TypedForce(ForceFeedbackDevice* parent, const char* name,
+                                               LPDIRECTINPUTEFFECT effect, const P& params)
+    : Force(parent, name, effect), m_params(params)
+{
+}
+
+template <typename P>
+void ForceFeedbackDevice::TypedForce<P>::UpdateEffect(int magnitude)
+{
+  if (UpdateParameters(magnitude))
+  {
+    if (magnitude)
+      PlayEffect();
+    else
+      StopEffect();
+  }
+}
+
+std::string ForceFeedbackDevice::Force::GetName() const
+{
+  return m_name;
+}
+
+ForceFeedbackDevice::Force::Force(ForceFeedbackDevice* parent, const char* name,
+                                  LPDIRECTINPUTEFFECT effect)
+    : m_effect(effect), m_parent(*parent), m_name(name), m_desired_magnitude()
+{
+}
+
+void ForceFeedbackDevice::Force::SetState(ControlState state)
+{
+  const auto new_val = int(DI_FFNOMINALMAX * state);
+
+  if (m_desired_magnitude.exchange(new_val) != new_val)
+    m_parent.SignalUpdateThread();
+}
+
+void ForceFeedbackDevice::Force::UpdateOutput()
+{
+  UpdateEffect(m_desired_magnitude);
+}
+
+void ForceFeedbackDevice::Force::Release()
+{
+  // This isn't in the destructor because it should happen before the device is released.
+  m_effect->Stop();
+  m_effect->Unload();
+  m_effect->Release();
+}
+}  // namespace ciface::ForceFeedback

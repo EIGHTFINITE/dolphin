@@ -1,139 +1,179 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "Core/PowerPC/Interpreter/Interpreter.h"
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Core/ConfigManager.h"
-#include "Core/CoreTiming.h"
+#include "Core/Core.h"
+#include "Core/Debugger/BranchWatch.h"
 #include "Core/HLE/HLE.h"
+#include "Core/PowerPC/Interpreter/ExceptionUtils.h"
 #include "Core/PowerPC/PowerPC.h"
-#include "Core/PowerPC/Interpreter/Interpreter.h"
+#include "Core/System.h"
 
-void Interpreter::bx(UGeckoInstruction _inst)
+void Interpreter::bx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	if (_inst.LK)
-		LR = PC + 4;
+  auto& ppc_state = interpreter.m_ppc_state;
 
-	if (_inst.AA)
-		NPC = SignExt26(_inst.LI << 2);
-	else
-		NPC = PC+SignExt26(_inst.LI << 2);
+  if (inst.LK)
+    LR(ppc_state) = ppc_state.pc + 4;
 
-	m_EndBlock = true;
+  u32 destination_addr = u32(SignExt26(inst.LI << 2));
+  if (!inst.AA)
+    destination_addr += ppc_state.pc;
+  ppc_state.npc = destination_addr;
 
-	if (NPC == PC && SConfig::GetInstance().bSkipIdle)
-	{
-		CoreTiming::Idle();
-	}
+  if (auto& branch_watch = interpreter.m_branch_watch; branch_watch.GetRecordingActive())
+    branch_watch.HitTrue(ppc_state.pc, destination_addr, inst, ppc_state.msr.IR);
+
+  interpreter.m_end_block = true;
 }
 
 // bcx - ugly, straight from PPC manual equations :)
-void Interpreter::bcx(UGeckoInstruction _inst)
+void Interpreter::bcx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	if ((_inst.BO & BO_DONT_DECREMENT_FLAG) == 0)
-		CTR--;
+  auto& ppc_state = interpreter.m_ppc_state;
+  auto& branch_watch = interpreter.m_branch_watch;
 
-	const bool true_false = ((_inst.BO >> 3) & 1);
-	const bool only_counter_check = ((_inst.BO >> 4) & 1);
-	const bool only_condition_check = ((_inst.BO >> 2) & 1);
-	int ctr_check = ((CTR != 0) ^ (_inst.BO >> 1)) & 1;
-	bool counter = only_condition_check || ctr_check;
-	bool condition = only_counter_check || (GetCRBit(_inst.BI) == u32(true_false));
+  if ((inst.BO & BO_DONT_DECREMENT_FLAG) == 0)
+    CTR(ppc_state)--;
 
-	if (counter && condition)
-	{
-		if (_inst.LK)
-			LR = PC + 4;
+  const bool true_false = ((inst.BO >> 3) & 1) != 0;
+  const bool only_counter_check = ((inst.BO >> 4) & 1) != 0;
+  const bool only_condition_check = ((inst.BO >> 2) & 1) != 0;
+  const u32 ctr_check = ((CTR(ppc_state) != 0) ^ (inst.BO >> 1)) & 1;
+  const bool counter = only_condition_check || ctr_check != 0;
+  const bool condition = only_counter_check || (ppc_state.cr.GetBit(inst.BI) == u32(true_false));
 
-		if (_inst.AA)
-			NPC = SignExt16(_inst.BD << 2);
-		else
-			NPC = PC + SignExt16(_inst.BD << 2);
-	}
+  if (counter && condition)
+  {
+    if (inst.LK)
+      LR(ppc_state) = ppc_state.pc + 4;
 
-	m_EndBlock = true;
+    u32 destination_addr = u32(SignExt16(s16(inst.BD << 2)));
+    if (!inst.AA)
+      destination_addr += ppc_state.pc;
+    ppc_state.npc = destination_addr;
 
-	// this code trys to detect the most common idle loop:
-	// lwz r0, XXXX(r13)
-	// cmpXwi r0,0
-	// beq -8
-	if (NPC == PC - 8 && _inst.hex == 0x4182fff8 /* beq */ && SConfig::GetInstance().bSkipIdle)
-	{
-		if (PowerPC::HostRead_U32(PC - 8) >> 16 == 0x800D /* lwz */ )
-		{
-			u32 last_inst = PowerPC::HostRead_U32(PC - 4);
+    if (branch_watch.GetRecordingActive())
+      branch_watch.HitTrue(ppc_state.pc, destination_addr, inst, ppc_state.msr.IR);
+  }
+  else if (branch_watch.GetRecordingActive())
+  {
+    branch_watch.HitFalse(ppc_state.pc, ppc_state.pc + 4, inst, ppc_state.msr.IR);
+  }
 
-			if (last_inst == 0x28000000 /* cmplwi */ || (last_inst == 0x2C000000 /* cmpwi */ && SConfig::GetInstance().bWii))
-			{
-				CoreTiming::Idle();
-			}
-		}
-	}
+  interpreter.m_end_block = true;
 }
 
-void Interpreter::bcctrx(UGeckoInstruction _inst)
+void Interpreter::bcctrx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	_dbg_assert_msg_(POWERPC, _inst.BO_2 & BO_DONT_DECREMENT_FLAG, "bcctrx with decrement and test CTR option is invalid!");
+  auto& ppc_state = interpreter.m_ppc_state;
+  auto& branch_watch = interpreter.m_branch_watch;
 
-	int condition = ((_inst.BO_2>>4) | (GetCRBit(_inst.BI_2) == ((_inst.BO_2>>3) & 1))) & 1;
+  DEBUG_ASSERT_MSG(POWERPC, (inst.BO_2 & BO_DONT_DECREMENT_FLAG) != 0,
+                   "bcctrx with decrement and test CTR option is invalid!");
 
-	if (condition)
-	{
-		NPC = CTR & (~3);
-		if (_inst.LK_3)
-			LR = PC + 4;
-	}
+  const u32 condition =
+      ((inst.BO_2 >> 4) | (ppc_state.cr.GetBit(inst.BI_2) == ((inst.BO_2 >> 3) & 1))) & 1;
 
-	m_EndBlock = true;
+  if (condition != 0)
+  {
+    const u32 destination_addr = CTR(ppc_state) & (~3);
+    ppc_state.npc = destination_addr;
+    if (inst.LK_3)
+      LR(ppc_state) = ppc_state.pc + 4;
+
+    if (branch_watch.GetRecordingActive())
+      branch_watch.HitTrue(ppc_state.pc, destination_addr, inst, ppc_state.msr.IR);
+  }
+  else if (branch_watch.GetRecordingActive())
+  {
+    branch_watch.HitFalse(ppc_state.pc, ppc_state.pc + 4, inst, ppc_state.msr.IR);
+  }
+
+  interpreter.m_end_block = true;
 }
 
-void Interpreter::bclrx(UGeckoInstruction _inst)
+void Interpreter::bclrx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	if ((_inst.BO_2 & BO_DONT_DECREMENT_FLAG) == 0)
-		CTR--;
+  auto& ppc_state = interpreter.m_ppc_state;
+  auto& branch_watch = interpreter.m_branch_watch;
 
-	int counter = ((_inst.BO_2 >> 2) | ((CTR != 0) ^ (_inst.BO_2 >> 1))) & 1;
-	int condition = ((_inst.BO_2 >> 4) | (GetCRBit(_inst.BI_2) == ((_inst.BO_2 >> 3) & 1))) & 1;
+  if ((inst.BO_2 & BO_DONT_DECREMENT_FLAG) == 0)
+    CTR(ppc_state)--;
 
-	if (counter & condition)
-	{
-		NPC = LR & (~3);
-		if (_inst.LK_3)
-			LR = PC + 4;
-	}
+  const u32 counter = ((inst.BO_2 >> 2) | ((CTR(ppc_state) != 0) ^ (inst.BO_2 >> 1))) & 1;
+  const u32 condition =
+      ((inst.BO_2 >> 4) | (ppc_state.cr.GetBit(inst.BI_2) == ((inst.BO_2 >> 3) & 1))) & 1;
 
-	m_EndBlock = true;
+  if ((counter & condition) != 0)
+  {
+    const u32 destination_addr = LR(ppc_state) & (~3);
+    ppc_state.npc = destination_addr;
+    if (inst.LK_3)
+      LR(ppc_state) = ppc_state.pc + 4;
+
+    if (branch_watch.GetRecordingActive())
+      branch_watch.HitTrue(ppc_state.pc, destination_addr, inst, ppc_state.msr.IR);
+  }
+  else if (branch_watch.GetRecordingActive())
+  {
+    branch_watch.HitFalse(ppc_state.pc, ppc_state.pc + 4, inst, ppc_state.msr.IR);
+  }
+
+  interpreter.m_end_block = true;
 }
 
-void Interpreter::HLEFunction(UGeckoInstruction _inst)
+void Interpreter::HLEFunction(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	m_EndBlock = true;
-	HLE::Execute(PC, _inst.hex);
+  interpreter.m_end_block = true;
+
+  ASSERT(Core::IsCPUThread());
+  Core::CPUThreadGuard guard(interpreter.m_system);
+
+  HLE::Execute(guard, interpreter.m_ppc_state.pc, inst.hex);
 }
 
-void Interpreter::rfi(UGeckoInstruction _inst)
+void Interpreter::rfi(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	// Restore saved bits from SRR1 to MSR.
-	// Gecko/Broadway can save more bits than explicitly defined in ppc spec
-	const int mask = 0x87C0FFFF;
-	MSR = (MSR & ~mask) | (SRR1 & mask);
-	//MSR[13] is set to 0.
-	MSR &= 0xFFFBFFFF;
-	// Here we should check if there are pending exceptions, and if their corresponding enable bits are set
-	// if above is true, we'd do:
-	//PowerPC::CheckExceptions();
-	//else
-	// set NPC to saved offset and resume
-	NPC = SRR0;
-	m_EndBlock = true;
+  auto& ppc_state = interpreter.m_ppc_state;
+
+  if (ppc_state.msr.PR)
+  {
+    GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
+    return;
+  }
+
+  // Restore saved bits from SRR1 to MSR.
+  // Gecko/Broadway can save more bits than explicitly defined in ppc spec
+  const u32 mask = 0x87C0FFFF;
+  ppc_state.msr.Hex = (ppc_state.msr.Hex & ~mask) | (SRR1(ppc_state) & mask);
+  // MSR[13] is set to 0.
+  ppc_state.msr.Hex &= 0xFFFBFFFF;
+  // Here we should check if there are pending exceptions, and if their corresponding enable bits
+  // are set
+  // if above is true, we'd do:
+  // PowerPC::CheckExceptions();
+  // else
+  // set NPC to saved offset and resume
+  ppc_state.npc = SRR0(ppc_state);
+
+  interpreter.m_system.GetPowerPC().MSRUpdated();
+
+  interpreter.m_end_block = true;
 }
 
-// sc isn't really used for anything important in GameCube games (just for a write barrier) so we really don't have to emulate it.
+// sc isn't really used for anything important in GameCube games (just for a write barrier) so we
+// really don't have to emulate it.
 // We do it anyway, though :P
-void Interpreter::sc(UGeckoInstruction _inst)
+void Interpreter::sc(Interpreter& interpreter, UGeckoInstruction inst)
 {
-	PowerPC::ppcState.Exceptions |= EXCEPTION_SYSCALL;
-	PowerPC::CheckExceptions();
-	m_EndBlock = true;
+  auto& ppc_state = interpreter.m_ppc_state;
+
+  ppc_state.Exceptions |= EXCEPTION_SYSCALL;
+  interpreter.m_system.GetPowerPC().CheckExceptions();
+  interpreter.m_end_block = true;
 }
