@@ -1,27 +1,24 @@
-set(LIBS core gtest)
-if(APPLE)
-	list(APPEND LIBS ${FOUNDATION_LIBRARY} ${CORESERV_LIBRARY})
-endif()
-if(ANDROID)
-	set(LIBS ${LIBS} android log)
-endif()
-macro(add_dolphin_test target srcs)
-	# Since this is a Core dependency, it can't be linked as a library and has
-	# to be linked as an object file. Otherwise CMake inserts the library after
-	# core, but before other core dependencies like videocommon which also use
-	# Host_ functions.
-	set(srcs2 ${srcs} ${CMAKE_SOURCE_DIR}/Source/UnitTests/TestUtils/StubHost.cpp)
-	add_executable(Test_${target} EXCLUDE_FROM_ALL ${srcs2})
-	set_target_properties(Test_${target} PROPERTIES OUTPUT_NAME Tests/${target})
-	add_custom_command(TARGET Test_${target}
-	                   PRE_LINK
-	                   COMMAND mkdir -p ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Tests)
-	target_link_libraries(Test_${target} ${LIBS})
-	add_dependencies(unittests Test_${target})
-	add_test(NAME ${target} COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Tests/${target})
-endmacro(add_dolphin_test)
+enable_testing()
+add_custom_target(unittests)
+add_custom_command(TARGET unittests POST_BUILD COMMAND ${CMAKE_CTEST_COMMAND} "--output-on-failure")
 
-add_subdirectory(TestUtils)
+string(APPEND CMAKE_RUNTIME_OUTPUT_DIRECTORY "/Tests")
+
+add_executable(tests EXCLUDE_FROM_ALL UnitTestsMain.cpp StubHost.cpp)
+set_target_properties(tests PROPERTIES FOLDER Tests)
+target_link_libraries(tests PRIVATE fmt::fmt gtest::gtest core uicommon)
+add_test(NAME tests COMMAND tests)
+add_custom_command(TARGET tests POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E remove_directory "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/Data/Sys" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Sys"
+)
+add_dependencies(unittests tests)
+
+macro(add_dolphin_test target)
+  add_library(${target} OBJECT ${ARGN})
+  target_link_libraries(${target} PUBLIC fmt::fmt gtest::gtest PRIVATE core uicommon)
+  target_link_libraries(tests PRIVATE ${target})
+endmacro()
 
 add_subdirectory(Common)
 add_subdirectory(Core)
