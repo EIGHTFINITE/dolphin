@@ -1,17 +1,19 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "Core/DSPEmulator.h"
 
 #include <memory>
 
-#include "Core/DSPEmulator.h"
 #include "Core/HW/DSPHLE/DSPHLE.h"
 #include "Core/HW/DSPLLE/DSPLLE.h"
 
-std::unique_ptr<DSPEmulator> CreateDSPEmulator(bool hle)
-{
-	if (hle)
-		return std::make_unique<DSPHLE>();
+DSPEmulator::~DSPEmulator() = default;
 
-	return std::make_unique<DSPLLE>();
+std::unique_ptr<DSPEmulator> CreateDSPEmulator(Core::System& system, bool hle)
+{
+  if (hle)
+    return std::make_unique<DSP::HLE::DSPHLE>(system);
+
+  return std::make_unique<DSP::LLE::DSPLLE>();
 }
