@@ -1,26 +1,16 @@
-TITLES = https://www.gametdb.com (type: Wii language: RU_unique version: 20250826093636)
-R5IR4Q = История игрушек: Парк развлечений
-RMFE68 = AMF Bowling Pinbusters!
-RMFP68 = AMF Bowling Pinbusters!
-RN4P41 = Anno: Create A New World
-RWAR78 = Валл-И
-RXDR4Q = Disney Отвечай Не Зевай
-RY2R41 = Возвращение бешеных кроликов
-RYBP69 = BOOM BLOX Bash Party
-S3AE5G = Attack of the Movies 3D
-S3APGT = Attack of the Movies 3D
-SALE4Q = Alice in Wonderland
-SALP4Q = Alice in Wonderland
-SBLE5G = A Boy and His Blob
-SBLP5G = A Boy and His Blob
-SJXD41 = Just Dance 4 Специальное издание
-STNP41 = Приключения Тинтина: Тайна Единорога
-GMSE02 = Супер Марио Саншайн Мультиплеер
-SOMR01 = Ритм небес
-HAFP = Канал новостей
-HAGP = Канал новостей
-HAJP = Канал голосований
-HAPP = Канал конкурсов Mii
-HATP = Канал Nintendo
-HAYA = Фотоканал
-HCCJ = Настройки адреса
+<html><head>
+<title>500 Internal Server Error</title>
+</head><body>
+<h1>Internal Server Error</h1>
+<p>The server encountered an internal error or
+misconfiguration and was unable to complete
+your request.</p>
+<p>Please contact the server administrator,
+ webmaster@gametdb.com and inform them of the time the error occurred,
+and anything you might have done that may have
+caused the error.</p>
+<p>More information about this error may be available
+in the server error log.</p>
+<hr>
+<address>Apache Server at www.gametdb.com Port 80</address>
+</body></html>
