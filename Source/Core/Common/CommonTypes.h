@@ -1,7 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
-
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 // This header contains type definitions that are shared between the Dolphin core and
 // other parts of the code. Any definitions that are only used by the core should be
@@ -9,6 +7,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 
 #ifdef _WIN32
@@ -19,12 +18,19 @@
 #define LONG int
 #endif
 
-typedef uint8_t  u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef uint64_t u64;
+using u8 = std::uint8_t;
+using u16 = std::uint16_t;
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
 
-typedef int8_t  s8;
-typedef int16_t s16;
-typedef int32_t s32;
-typedef int64_t s64;
+using s8 = std::int8_t;
+using s16 = std::int16_t;
+using s32 = std::int32_t;
+using s64 = std::int64_t;
+
+using Clock = std::chrono::steady_clock;
+using TimePoint = Clock::time_point;
+using DT = Clock::duration;
+using DT_us = std::chrono::duration<double, std::micro>;
+using DT_ms = std::chrono::duration<double, std::milli>;
+using DT_s = std::chrono::duration<double, std::ratio<1>>;

@@ -1,31 +1,24 @@
 // Copyright 2011 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <string>
 #include "VideoCommon/VideoBackendBase.h"
 
-namespace MMIO { class Mapping; }
-
 namespace SW
 {
-
 class VideoSoftware : public VideoBackendBase
 {
-	bool Initialize(void *window_handle) override;
-	void Shutdown() override;
+  bool Initialize(const WindowSystemInfo& wsi) override;
+  void Shutdown() override;
 
-	std::string GetName() const override;
-	std::string GetDisplayName() const override;
+  std::string GetConfigName() const override;
+  std::string GetDisplayName() const override;
+  std::optional<std::string> GetWarningMessage() const override;
 
-	void Video_Prepare() override;
-	void Video_Cleanup() override;
+  void InitBackendInfo(const WindowSystemInfo& wsi) override;
 
-	void ShowConfig(void* parent) override;
-
-	unsigned int PeekMessages() override;
+  static constexpr const char* CONFIG_NAME = "Software Renderer";
 };
-
-}
+}  // namespace SW
