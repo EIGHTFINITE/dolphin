@@ -9,8 +9,8 @@
 #   kernel.yama.ptrace_scope = 0
 #
 # Example usage:
-# $ dolphin-emu -P /tmp -b -e $game
-# $ perf top -p $(pidof dolphin-emu) --objdump ./Tools/perf-disassemble.sh
+# $ dolphin-emu -C Dolphin.Core.PerfMapDir=/tmp -b -e $game
+# $ perf top -p $(pidof dolphin-emu) --objdump ./Tools/perf-disassemble.sh -M intel
 
 flavor=att
 raw=r
@@ -30,6 +30,9 @@ do
             ;;
         --stop-address=*)
             stop="${1##--stop-address=}"
+            ;;
+        --no-show-raw-insn)
+            raw=
             ;;
         --no-show-raw)
             raw=

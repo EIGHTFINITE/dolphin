@@ -1,72 +1,65 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <cstring>
-#include "Common/Common.h"
-#include "Common/CommonFuncs.h"
+
 #include "Common/CommonTypes.h"
+#include "Common/Inline.h"
+#include "Common/Swap.h"
 
 class DataReader
 {
 public:
-	__forceinline DataReader()
-	: buffer(nullptr), end(nullptr) {}
+  DataReader() = default;
+  DataReader(u8* src, u8* end_) : buffer(src), end(end_) {}
+  u8* GetPointer() { return buffer; }
+  const u8* GetPointer() const { return buffer; }
+  DataReader& operator=(u8* src)
+  {
+    buffer = src;
+    return *this;
+  }
 
-	__forceinline DataReader(u8* src, u8* _end)
-	: buffer(src), end(_end) {}
+  size_t size() const { return end - buffer; }
+  template <typename T, bool swapped = true>
+  DOLPHIN_FORCE_INLINE T Peek(int offset = 0) const
+  {
+    T data;
+    std::memcpy(&data, &buffer[offset], sizeof(T));
 
-	__forceinline u8* GetPointer()
-	{
-		return buffer;
-	}
+    if constexpr (swapped)
+      data = Common::FromBigEndian(data);
 
-	__forceinline u8* operator=(u8* src)
-	{
-		buffer = src;
-		return src;
-	}
+    return data;
+  }
 
-	__forceinline size_t size()
-	{
-		return end - buffer;
-	}
+  template <typename T, bool swapped = true>
+  DOLPHIN_FORCE_INLINE T Read()
+  {
+    const T result = Peek<T, swapped>();
+    buffer += sizeof(T);
+    return result;
+  }
 
-	template <typename T, bool swapped = true> __forceinline T Peek(int offset = 0)
-	{
-		T data;
-		std::memcpy(&data, &buffer[offset], sizeof(T));
+  template <typename T, bool swapped = false>
+  DOLPHIN_FORCE_INLINE void Write(T data)
+  {
+    if constexpr (swapped)
+      data = Common::FromBigEndian(data);
 
-		if (swapped)
-			data = Common::FromBigEndian(data);
+    std::memcpy(buffer, &data, sizeof(T));
+    buffer += sizeof(T);
+  }
 
-		return data;
-	}
-
-	template <typename T, bool swapped = true> __forceinline T Read()
-	{
-		const T result = Peek<T, swapped>();
-		buffer += sizeof(T);
-		return result;
-	}
-
-	template <typename T, bool swapped = false> __forceinline void Write(T data)
-	{
-		if (swapped)
-			data = Common::FromBigEndian(data);
-
-		std::memcpy(buffer, &data, sizeof(T));
-		buffer += sizeof(T);
-	}
-
-	template <typename T = u8> __forceinline void Skip(size_t data = 1)
-	{
-		buffer += sizeof(T) * data;
-	}
+  template <typename T = u8>
+  void Skip(size_t data = 1)
+  {
+    buffer += sizeof(T) * data;
+  }
 
 private:
-	u8* __restrict buffer;
-	u8* end;
+  u8* __restrict buffer = nullptr;
+  u8* end = nullptr;
 };
