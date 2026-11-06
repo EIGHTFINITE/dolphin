@@ -1,95 +1,87 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "DiscIO/CISOBlob.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <memory>
+#include <utility>
 
+#include "Common/BitUtils.h"
 #include "Common/CommonTypes.h"
-#include "Common/FileUtil.h"
-#include "DiscIO/CISOBlob.h"
 
 namespace DiscIO
 {
-
-static const char CISO_MAGIC[] = "CISO";
-
-CISOFileReader::CISOFileReader(std::FILE* file)
-	: m_file(file)
+CISOFileReader::CISOFileReader(File::DirectIOFile file) : m_file(std::move(file))
 {
-	m_size = m_file.GetSize();
+  m_size = m_file.GetSize();
 
-	CISOHeader header;
-	m_file.ReadArray(&header, 1);
+  CISOHeader header;
+  m_file.OffsetRead(0, Common::AsWritableU8Span(header));
 
-	m_block_size = header.block_size;
+  m_block_size = header.block_size;
 
-	MapType count = 0;
-	for (u32 idx = 0; idx < CISO_MAP_SIZE; ++idx)
-		m_ciso_map[idx] = (1 == header.map[idx]) ? count++ : UNUSED_BLOCK_ID;
+  MapType count = 0;
+  for (u32 idx = 0; idx < CISO_MAP_SIZE; ++idx)
+    m_ciso_map[idx] = (1 == header.map[idx]) ? count++ : UNUSED_BLOCK_ID;
 }
 
-std::unique_ptr<CISOFileReader> CISOFileReader::Create(const std::string& filename)
+std::unique_ptr<CISOFileReader> CISOFileReader::Create(File::DirectIOFile file)
 {
-	if (IsCISOBlob(filename))
-	{
-		File::IOFile f(filename, "rb");
-		return std::unique_ptr<CISOFileReader>(new CISOFileReader(f.ReleaseHandle()));
-	}
+  CISOHeader header;
+  if (file.OffsetRead(0, Common::AsWritableU8Span(header)) && header.magic == CISO_MAGIC)
+  {
+    return std::unique_ptr<CISOFileReader>(new CISOFileReader(std::move(file)));
+  }
 
-	return nullptr;
+  return nullptr;
+}
+
+std::unique_ptr<BlobReader> CISOFileReader::CopyReader() const
+{
+  return Create(m_file);
 }
 
 u64 CISOFileReader::GetDataSize() const
 {
-	return CISO_MAP_SIZE * m_block_size;
+  return static_cast<u64>(CISO_MAP_SIZE) * m_block_size;
 }
 
 u64 CISOFileReader::GetRawSize() const
 {
-	return m_size;
+  return m_size;
 }
 
 bool CISOFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
 {
-	while (nbytes != 0)
-	{
-		u64 const block = offset / m_block_size;
-		u64 const data_offset = offset % m_block_size;
-		u64 const bytes_to_read = std::min(m_block_size - data_offset, nbytes);
+  if (offset + nbytes > GetDataSize())
+    return false;
 
-		if (block < CISO_MAP_SIZE && UNUSED_BLOCK_ID != m_ciso_map[block])
-		{
-			// calculate the base address
-			u64 const file_off = CISO_HEADER_SIZE + m_ciso_map[block] * (u64)m_block_size + data_offset;
+  while (nbytes != 0)
+  {
+    u64 const block = offset / m_block_size;
+    u64 const data_offset = offset % m_block_size;
+    u64 const bytes_to_read = std::min(m_block_size - data_offset, nbytes);
 
-			if (!(m_file.Seek(file_off, SEEK_SET) && m_file.ReadArray(out_ptr, bytes_to_read)))
-			{
-				m_file.Clear();
-				return false;
-			}
-		}
-		else
-		{
-			std::fill_n(out_ptr, bytes_to_read, 0);
-		}
+    if (block < CISO_MAP_SIZE && UNUSED_BLOCK_ID != m_ciso_map[block])
+    {
+      // calculate the base address
+      u64 const file_off = CISO_HEADER_SIZE + m_ciso_map[block] * (u64)m_block_size + data_offset;
 
-		out_ptr += bytes_to_read;
-		offset  += bytes_to_read;
-		nbytes  -= bytes_to_read;
-	}
+      if (!m_file.OffsetRead(file_off, out_ptr, bytes_to_read))
+        return false;
+    }
+    else
+    {
+      std::fill_n(out_ptr, bytes_to_read, 0);
+    }
 
-	return true;
+    out_ptr += bytes_to_read;
+    offset += bytes_to_read;
+    nbytes -= bytes_to_read;
+  }
+
+  return true;
 }
 
-bool IsCISOBlob(const std::string& filename)
-{
-	File::IOFile f(filename, "rb");
-
-	CISOHeader header;
-	return (f.ReadArray(&header, 1) &&
-		std::equal(header.magic, header.magic + sizeof(header.magic), CISO_MAGIC));
-}
-
-}  // namespace
+}  // namespace DiscIO
